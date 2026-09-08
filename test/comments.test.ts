@@ -273,3 +273,13 @@ describe("regressions from review", () => {
     expect(mock.calls).toHaveLength(0);
   });
 });
+
+describe("non-positive comment cap", () => {
+  it("returns nothing and makes no request", async () => {
+    const mock = mockFetch({ json: threadBody("main", comments(5, 1)) });
+    const api = createCommentsApi(testHttp(mock), noResolver);
+    await expect(api.fetchAllComments(nvComment, { maxTotalCount: 0 })).resolves.toEqual([]);
+    await expect(api.fetchAllComments(nvComment, { maxTotalCount: -3 })).resolves.toEqual([]);
+    expect(mock.calls).toHaveLength(0);
+  });
+});

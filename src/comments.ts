@@ -245,6 +245,7 @@ export function createCommentsApi(http: NiconicoHttp, resolveWatchThreads: Watch
     },
 
     async fetchAllComments(nvComment, options = {}) {
+      if (options.maxTotalCount !== undefined && options.maxTotalCount <= 0) return [];
       const includeEasy = options.includeEasy ?? false;
       const maxRounds = options.maxRoundsPerThread ?? 10_000;
       const targets = nvComment.params.targets.filter((target) => includeEasy || target.fork !== "easy");

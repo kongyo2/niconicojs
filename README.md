@@ -247,7 +247,9 @@ Publishing is a manual GitHub Action: **Actions → Publish to npm → Run workf
 | `tag` | npm dist-tag (`latest`, `next`, `beta`) |
 | `dry_run` | Run every check and pack the tarball, but stop before publishing |
 
-The job runs `check`, the type-aware lint and the comment gate, refuses to overwrite a version already on npm, validates the tarball with `attw` and `publint`, then publishes with npm provenance. A version bump (anything but `current`) is committed, tagged and released on GitHub afterwards.
+The job runs `check`, the type-aware lint and the comment gate, validates the tarball with `attw` and `publint`, commits and tags the version, then publishes with npm provenance and creates the GitHub release.
+
+The commit and tag are pushed *before* the upload, because `npm publish` cannot be undone: a version reaches the registry only after its repository metadata exists. Every step is idempotent, so **rerun a partially failed release with `version: current`** — the bump is already committed on the branch, so `current` resolves to exactly the version being repaired, an already-published version skips the upload, and an existing tag or release is left alone. Rerunning with a bump operand instead would compute a *new* version and publish a second release.
 
 It needs two repository settings: an `npm-publish` environment and an `NPM_TOKEN` secret holding an npm automation token with publish rights.
 

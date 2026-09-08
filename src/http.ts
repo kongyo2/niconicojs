@@ -43,6 +43,19 @@ const DEFAULT_USER_AGENT =
 
 export const NICOVIDEO_ORIGIN = "https://www.nicovideo.jp";
 
+const SESSION_COOKIE_DOMAINS = ["nicovideo.jp", "nico.ms"] as const;
+
+export function isNiconicoHost(url: string): boolean {
+  let hostname: string;
+  try {
+    ({ hostname } = new URL(url));
+  } catch {
+    return false;
+  }
+  const host = hostname.toLowerCase().replace(/\.$/, "");
+  return SESSION_COOKIE_DOMAINS.some((domain) => host === domain || host.endsWith(`.${domain}`));
+}
+
 class RetryableHttpError extends Error {
   readonly status: number;
   readonly retryAfterMs: number | undefined;
@@ -139,7 +152,7 @@ export class NiconicoHttp {
     return this.session !== undefined;
   }
 
-  baseHeaders(): Record<string, string> {
+  baseHeaders(url: string): Record<string, string> {
     const headers: Record<string, string> = {
       "User-Agent": this.userAgent,
       "X-Frontend-Id": String(this.frontendId),
@@ -148,7 +161,7 @@ export class NiconicoHttp {
       Referer: `${NICOVIDEO_ORIGIN}/`,
       ...this.extraHeaders,
     };
-    if (this.session !== undefined) {
+    if (this.session !== undefined && isNiconicoHost(url)) {
       headers["Cookie"] = `user_session=${this.session}`;
     }
     return headers;
@@ -163,7 +176,7 @@ export class NiconicoHttp {
   ): Promise<RawResponse> {
     const timeout = AbortSignal.timeout(this.timeoutMs);
     const composed = signal === undefined ? timeout : AbortSignal.any([signal, timeout]);
-    const headers: Record<string, string> = { ...this.baseHeaders(), ...extraHeaders };
+    const headers: Record<string, string> = { ...this.baseHeaders(url), ...extraHeaders };
     const init: RequestInit = { method, headers, signal: composed, redirect: "follow" };
     if (body !== undefined) {
       init.body = body;
@@ -326,13 +339,17 @@ function readErrorEnvelope(body: unknown): Pick<NiconicoApiErrorPayload, "errorC
   };
 }
 
+function splitSetCookieValue(value: string): string[] {
+  return value.split(/,\s*(?=[^\s;,=]+=)/).filter((cookie) => cookie.length > 0);
+}
+
 export function readSetCookies(response: Response): string[] {
   const headers: Headers & { getSetCookie?: () => string[] } = response.headers;
-  if (typeof headers.getSetCookie === "function") {
-    return headers.getSetCookie();
-  }
-  const single = response.headers.get("set-cookie");
-  return single === null ? [] : [single];
+  const raw =
+    typeof headers.getSetCookie === "function"
+      ? headers.getSetCookie()
+      : [response.headers.get("set-cookie")].filter((value): value is string => value !== null);
+  return raw.flatMap(splitSetCookieValue);
 }
 
 export function readCookieValue(response: Response, name: string): string | undefined {

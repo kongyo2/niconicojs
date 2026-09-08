@@ -6,6 +6,7 @@ export {
   buildQuery,
   commentRateLimiter,
   extractUserSession,
+  isNiconicoHost,
   readCookieValue,
   readSetCookies,
   COMMENT_RATE_LIMIT_MS,

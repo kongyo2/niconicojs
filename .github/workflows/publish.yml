@@ -55,50 +55,44 @@ jobs:
           npm run lint:types
           npm run comments:check
 
+      # A bump operand is resolved against the checked-out package.json, so a
+      # rerun after a partial failure would compute a *different* version and
+      # publish a second release instead of finishing the first. Rerun such a
+      # release with version: current — the bump is already committed on the
+      # branch, so `current` resolves to exactly the version being repaired.
       - name: Resolve the version to publish
         id: version
         run: |
           set -euo pipefail
           input='${{ inputs.version }}'
-          if [ "$input" = "current" ]; then
-            version="$(node -p "require('./package.json').version")"
-          else
-            git config user.name  "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            version="$(npm version "$input" --no-git-tag-version | tr -d 'v')"
-          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          case "$input" in
+            current)
+              version="$(node -p "require('./package.json').version")"
+              ;;
+            major|minor|patch|premajor|preminor|prepatch|prerelease)
+              version="$(npm version "$input" --no-git-tag-version | tr -d 'v')"
+              ;;
+            *)
+              # An exact version: --allow-same-version lets a rerun re-resolve
+              # the same number instead of failing on an unchanged package.json.
+              version="$(npm version "$input" --no-git-tag-version --allow-same-version | tr -d 'v')"
+              ;;
+          esac
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "Publishing $version under dist-tag '${{ inputs.tag }}'"
-
-      # npm publish is irreversible, but the git tag and GitHub release that
-      # follow it can fail. A rerun must be able to finish those, so an
-      # already-published version skips the upload instead of failing the job.
-      - name: Check whether this version is already on npm
-        id: published
-        run: |
-          set -euo pipefail
-          name="$(node -p "require('./package.json').name")"
-          version='${{ steps.version.outputs.version }}'
-          if npm view "$name@$version" version >/dev/null 2>&1; then
-            echo "::warning::$name@$version is already on npm; skipping the upload and completing the release steps."
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
+          echo "Releasing $version under dist-tag '${{ inputs.tag }}'"
 
       # Builds via prepack, then checks the tarball resolves for both
       # module systems before anything is uploaded.
       - name: Validate the package tarball
         run: npm run verify:package
 
-      - name: Publish
-        if: ${{ !inputs.dry_run && steps.published.outputs.exists == 'false' }}
-        run: npm publish --access public --provenance --tag '${{ inputs.tag }}'
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Commit the version bump and tag it
-        if: ${{ !inputs.dry_run && inputs.version != 'current' }}
+      # The commit and tag go first: npm publish cannot be undone, so the
+      # repository metadata for a version must exist before that version can
+      # reach the registry, never after.
+      - name: Commit the version and tag it
+        if: ${{ !inputs.dry_run }}
         run: |
           set -euo pipefail
           version='${{ steps.version.outputs.version }}'
@@ -111,8 +105,27 @@ jobs:
           fi
           git push origin HEAD --follow-tags
 
+      - name: Check whether this version is already on npm
+        id: published
+        run: |
+          set -euo pipefail
+          name="$(node -p "require('./package.json').name")"
+          version='${{ steps.version.outputs.version }}'
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "::warning::$name@$version is already on npm; skipping the upload and finishing the release."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish
+        if: ${{ !inputs.dry_run && steps.published.outputs.exists == 'false' }}
+        run: npm publish --access public --provenance --tag '${{ inputs.tag }}'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
       - name: Create the GitHub release
-        if: ${{ !inputs.dry_run && inputs.version != 'current' }}
+        if: ${{ !inputs.dry_run }}
         run: |
           set -euo pipefail
           version='${{ steps.version.outputs.version }}'

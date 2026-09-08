@@ -6,6 +6,7 @@ import {
   RateLimiter,
   readCookieValue,
   pickRequestOptions,
+  isNiconicoHost,
   type FetchLike,
 } from "../src/http.js";
 import { NiconicoApiError, NiconicoNetworkError, NiconicoTimeoutError } from "../src/errors.js";
@@ -287,5 +288,36 @@ describe("regressions from review", () => {
       idempotent: true,
     });
     expect(pickRequestOptions({})).toEqual({});
+  });
+});
+
+describe("session cookie scoping", () => {
+  it("sends the cookie to niconico hosts", async () => {
+    const mock = mockFetch({ json: nvapi({}) });
+    await testHttp(mock, { session: "secret" }).getJson("https://nvapi.nicovideo.jp/v1/x");
+    expect(mock.only().headers["Cookie"]).toBe("user_session=secret");
+  });
+
+  it("withholds the cookie from every other host", async () => {
+    const mock = mockFetch({ json: nvapi({}) });
+    await testHttp(mock, { session: "secret" }).getJson("https://third-party.example/collect");
+    expect(mock.only().headers["Cookie"]).toBeUndefined();
+  });
+
+  it("is not fooled by lookalike hostnames", () => {
+    expect(isNiconicoHost("https://nvapi.nicovideo.jp/v1/x")).toBe(true);
+    expect(isNiconicoHost("https://nicovideo.jp/")).toBe(true);
+    expect(isNiconicoHost("https://nico.ms/sm9")).toBe(true);
+    expect(isNiconicoHost("https://evil-nicovideo.jp/")).toBe(false);
+    expect(isNiconicoHost("https://nicovideo.jp.example.com/")).toBe(false);
+    expect(isNiconicoHost("https://nicovideo.jp.evil/")).toBe(false);
+    expect(isNiconicoHost("not a url")).toBe(false);
+  });
+
+  it("splits a comma-combined Set-Cookie when getSetCookie is absent", () => {
+    const response = new Response("", {
+      headers: { "set-cookie": "a=1; Expires=Wed, 09 Jun 2021 10:18:14 GMT, domand_bid=bid42; Path=/" },
+    });
+    expect(readCookieValue(response, "domand_bid")).toBe("bid42");
   });
 });
