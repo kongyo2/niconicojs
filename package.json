@@ -1,0 +1,89 @@
+{
+  "name": "@kongyo2/niconicojs",
+  "version": "0.1.0",
+  "description": "Unofficial TypeScript client library for Niconico (nicovideo.jp) web APIs — videos, search, ranking, mylists, series, users, comments, and DMS/HLS streaming.",
+  "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20.3.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --pretty false",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "typecheck": "tsc --noEmit --pretty false",
+    "typecheck:test": "tsc -p tsconfig.test.json --pretty false",
+    "lint": "oxlint --deny-warnings --format agent",
+    "lint:fix": "oxlint --fix --deny-warnings --format agent",
+    "lint:types": "oxlint --type-aware --deny-warnings --format agent",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "verify:live": "tsx scripts/live-verify.ts",
+    "comments:check": "ts-comment-scanner --fail-on-comment --skip-directives src test scripts",
+    "comments:strip": "ts-comment-scanner --remove src test scripts",
+    "check": "npm run typecheck && npm run typecheck:test && npm run lint && npm run format:check && npm test && npm run build",
+    "prepack": "npm run clean && npm run build",
+    "verify:package": "attw --pack . --ignore-rules cjs-resolves-to-esm && publint --strict"
+  },
+  "keywords": [
+    "niconico",
+    "nicovideo",
+    "nvapi",
+    "api",
+    "client",
+    "unofficial",
+    "typescript",
+    "hls",
+    "dms",
+    "comments",
+    "ranking"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.2",
+    "@kongyo2/ts-comment-scanner": "^1.1.0",
+    "@types/node": "^24.13.3",
+    "oxlint": "^1.82.0",
+    "oxlint-tsgolint": "^7.0.2001",
+    "prettier": "^3.9.6",
+    "publint": "^0.3.16",
+    "tsx": "^4.23.13",
+    "typescript": "^6.0.3",
+    "vitest": "^5.0.0"
+  },
+  "dependencies": {
+    "fast-xml-parser": "^5.3.1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kongyo2/niconicojs.git"
+  },
+  "bugs": {
+    "url": "https://github.com/kongyo2/niconicojs/issues"
+  },
+  "homepage": "https://github.com/kongyo2/niconicojs#readme",
+  "peerDependencies": {
+    "@types/node": ">=20"
+  },
+  "peerDependenciesMeta": {
+    "@types/node": {
+      "optional": true
+    }
+  }
+}

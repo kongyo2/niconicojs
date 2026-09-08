@@ -1,0 +1,14 @@
+node_modules/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# Secrets: a user_session cookie is a live credential — never commit one.
+.env
+.env.*
+!.env.example
+*.local
+
+.DS_Store
+*.log
