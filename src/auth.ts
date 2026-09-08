@@ -64,7 +64,6 @@ export function createAuthApi(http: NiconicoHttp, accountPublic: AccountPublicAp
         return true;
       } catch (error) {
         if (error instanceof NiconicoAuthError) return false;
-        if (error instanceof NiconicoApiError) return false;
         throw error;
       }
     },

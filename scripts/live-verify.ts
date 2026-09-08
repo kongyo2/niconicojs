@@ -33,11 +33,14 @@ function skip(name: string, why: string): void {
 }
 
 async function main(): Promise<void> {
-  await check("auth.verifySession", async () => {
-    if (SESSION === undefined) throw new Error("NICONICO_SESSION not set");
-    const me = await client.auth.verifySession();
-    return `${me.nickname} (#${me.userId}) premium=${me.isPremium}`;
-  });
+  if (SESSION === undefined) {
+    skip("auth.verifySession", "NICONICO_SESSION not set");
+  } else {
+    await check("auth.verifySession", async () => {
+      const me = await client.auth.verifySession();
+      return `${me.nickname} (#${me.userId}) premium=${me.isPremium}`;
+    });
+  }
 
   await check("users.getUser", async () => {
     const { user, relationships } = await guest.users.getUser(USER_ID);

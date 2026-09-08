@@ -113,7 +113,7 @@ export function createStreamingApi(http: NiconicoHttp): StreamingApi {
       `${NVAPI}/v1/watch/${encodeURIComponent(videoId)}/access-rights/${kind}` +
       `?actionTrackId=${encodeURIComponent(actionTrackId)}`;
 
-    const response = await http.request(
+    const raw = await http.request(
       url,
       { method: "POST", body: JSON.stringify(body) },
       {
@@ -124,19 +124,19 @@ export function createStreamingApi(http: NiconicoHttp): StreamingApi {
       { signal },
     );
 
-    const json = await http.parseJsonResponse<{
+    const json = http.parseJsonResponse<{
       data?: { contentUrl?: string; createTime?: string; expireTime?: string };
-    }>(url, response, false);
+    }>(url, raw, false);
 
     const contentUrl = json.data?.contentUrl;
     if (contentUrl === undefined) {
-      throw new NiconicoApiError(url, { status: response.status, errorCode: "MISSING_CONTENT_URL" });
+      throw new NiconicoApiError(url, { status: raw.response.status, errorCode: "MISSING_CONTENT_URL" });
     }
     return {
       contentUrl,
       ...(json.data?.createTime === undefined ? {} : { createTime: json.data.createTime }),
       ...(json.data?.expireTime === undefined ? {} : { expireTime: json.data.expireTime }),
-      domandBidCookie: readCookieValue(response, "domand_bid"),
+      domandBidCookie: readCookieValue(raw.response, "domand_bid"),
     };
   }
 
@@ -206,20 +206,33 @@ export function createStreamingApi(http: NiconicoHttp): StreamingApi {
         throw new DomandUnavailableError(videoId, "accessRightKey is null — the session may lack watch rights");
       }
 
-      const video =
-        options.videoStreamId === undefined
-          ? pickBestVideo(domand)
-          : domand.videos.find((candidate) => candidate.id === options.videoStreamId);
-      if (options.videoStreamId !== undefined && video === undefined) {
-        throw new DomandUnavailableError(videoId, `unknown video stream ${options.videoStreamId}`);
+      let video: DomandVideoStream | undefined;
+      if (options.videoStreamId === undefined) {
+        video = pickBestVideo(domand);
+      } else {
+        const requested = domand.videos.find((candidate) => candidate.id === options.videoStreamId);
+        if (requested === undefined) {
+          throw new DomandUnavailableError(videoId, `unknown video stream ${options.videoStreamId}`);
+        }
+        if (!requested.isAvailable) {
+          throw new DomandUnavailableError(videoId, `video stream ${requested.id} is not available`);
+        }
+        video = requested;
       }
 
-      const audio =
-        options.audioStreamId !== undefined
-          ? domand.audios.find((candidate) => candidate.id === options.audioStreamId)
-          : video === undefined
-            ? pickBestAudio(domand)
-            : pickAudioForVideo(domand, video);
+      let audio: DomandAudioStream | undefined;
+      if (options.audioStreamId === undefined) {
+        audio = video === undefined ? pickBestAudio(domand) : pickAudioForVideo(domand, video);
+      } else {
+        const requested = domand.audios.find((candidate) => candidate.id === options.audioStreamId);
+        if (requested === undefined) {
+          throw new DomandUnavailableError(videoId, `unknown audio stream ${options.audioStreamId}`);
+        }
+        if (!requested.isAvailable) {
+          throw new DomandUnavailableError(videoId, `audio stream ${requested.id} is not available`);
+        }
+        audio = requested;
+      }
       if (audio === undefined) {
         throw new DomandUnavailableError(videoId, "no available audio stream");
       }

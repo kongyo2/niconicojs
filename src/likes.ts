@@ -1,4 +1,4 @@
-import { buildQuery, NICOVIDEO_ORIGIN, type NiconicoHttp, type RequestOptions } from "./http.js";
+import { buildQuery, NICOVIDEO_ORIGIN, type NiconicoHttp, type RequestOptions, pickRequestOptions } from "./http.js";
 import type { EssentialVideo } from "./types.js";
 
 const NVAPI = "https://nvapi.nicovideo.jp";
@@ -34,7 +34,7 @@ export function createLikesApi(http: NiconicoHttp): LikesApi {
           items?: LikedItem[];
           summary?: { hasNext?: boolean; canGetNextPage?: boolean; getNextPageNgReason?: string | null };
         };
-      }>(`${NVAPI}/v1/users/me/likes${query}`, { signal: params.signal });
+      }>(`${NVAPI}/v1/users/me/likes${query}`, pickRequestOptions(params));
       return {
         items: res.data.items ?? [],
         hasNext: res.data.summary?.hasNext ?? false,

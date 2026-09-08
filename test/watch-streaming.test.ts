@@ -250,3 +250,12 @@ describe("StreamingApi", () => {
     expect(result.contentUrl).toBe("https://asset/story.json");
   });
 });
+
+describe("regressions from review", () => {
+  it("rejects an explicitly chosen stream that is not available", () => {
+    const api = createStreamingApi(testHttp(mockFetch({})));
+    expect(() => api.getHlsFromWatch(watchResult(media), { videoStreamId: "video-h264-1080p" })).toThrow(
+      /video-h264-1080p is not available/,
+    );
+  });
+});

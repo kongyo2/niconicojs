@@ -1,4 +1,4 @@
-import { buildQuery, type NiconicoHttp, type RequestOptions } from "./http.js";
+import { buildQuery, type NiconicoHttp, type RequestOptions, pickRequestOptions } from "./http.js";
 import type { SortOrder } from "./types.js";
 import type { SeriesDetail, SeriesItem } from "./types.js";
 import type { MylistSortKey } from "./mylists.js";
@@ -38,9 +38,7 @@ export function createSeriesApi(http: NiconicoHttp): SeriesApi {
     });
     const res = await http.getJson<{
       data: { detail: SeriesDetail; totalCount?: number; items?: SeriesItem[] };
-    }>(`${NVAPI}/${version}/series/${encodeURIComponent(String(seriesId))}${query}`, {
-      signal: params.signal,
-    });
+    }>(`${NVAPI}/${version}/series/${encodeURIComponent(String(seriesId))}${query}`, pickRequestOptions(params));
     const items = res.data.items ?? [];
     return { detail: res.data.detail, totalCount: res.data.totalCount ?? items.length, items };
   }

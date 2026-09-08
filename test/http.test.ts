@@ -5,6 +5,7 @@ import {
   NiconicoHttp,
   RateLimiter,
   readCookieValue,
+  pickRequestOptions,
   type FetchLike,
 } from "../src/http.js";
 import { NiconicoApiError, NiconicoNetworkError, NiconicoTimeoutError } from "../src/errors.js";
@@ -239,5 +240,52 @@ describe("RateLimiter", () => {
     await limiter.acquire(30);
     await limiter.acquire(30);
     expect(Date.now() - started).toBeGreaterThanOrEqual(55);
+  });
+});
+
+describe("regressions from review", () => {
+  it("does not match a cookie whose name merely ends in user_session", () => {
+    const good = "user_session_1_good";
+    expect(extractUserSession(`old_user_session=bad; user_session=${good}`)).toBe(good);
+    expect(extractUserSession(`x_user_session=bad`)).toBeUndefined();
+  });
+
+  it("converts a stalled body read into a timeout, not a raw fetch error", async () => {
+    const impl: FetchLike = (_url, init) =>
+      Promise.resolve({
+        status: 200,
+        ok: true,
+        headers: new Headers(),
+        text: () =>
+          new Promise((_resolve, reject) => {
+            init.signal?.addEventListener("abort", () => {
+              reject(new DOMException("TimeoutError", "TimeoutError"));
+            });
+          }),
+      } as unknown as Response);
+    const http = new NiconicoHttp({ fetch: impl, timeoutMs: 5, retryAttempts: 1 });
+    await expect(http.getJson("https://x.invalid/y")).rejects.toBeInstanceOf(NiconicoTimeoutError);
+  });
+
+  it("stops waiting out a long Retry-After when the caller aborts", async () => {
+    const controller = new AbortController();
+    const mock = mockFetch({ status: 429, headers: { "retry-after": "600" } });
+    const http = new NiconicoHttp({ fetch: mock.fetch, retryAttempts: 3, retryBaseDelayMs: 1 });
+    const started = Date.now();
+    const promise = http.getJson("https://x.invalid/y", { signal: controller.signal });
+    setTimeout(() => controller.abort(), 20);
+    await expect(promise).rejects.toBeTruthy();
+    expect(Date.now() - started).toBeLessThan(5000);
+  });
+
+  it("forwards every RequestOptions field, not just signal", () => {
+    const signal = new AbortController().signal;
+    expect(pickRequestOptions({ headers: { A: "1" }, signal, rateLimitMs: 5, idempotent: true })).toEqual({
+      headers: { A: "1" },
+      signal,
+      rateLimitMs: 5,
+      idempotent: true,
+    });
+    expect(pickRequestOptions({})).toEqual({});
   });
 });

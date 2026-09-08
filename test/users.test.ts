@@ -129,3 +129,23 @@ describe("getCreatorSupport", () => {
     expect(result.isSupportable).toBe(true);
   });
 });
+
+describe("regressions from review", () => {
+  it("keeps paging past a page whose entries were all filtered out", async () => {
+    const page = (essentials: string[]) =>
+      nvapi({
+        totalCount: 3,
+        items: [
+          ...essentials.map((id) => ({ essential: { id, title: id, count: {}, thumbnail: {}, owner: null } })),
+          { series: null },
+        ],
+      });
+    const mock = mockFetch([{ json: page([]) }, { json: page(["b"]) }, { json: page(["c"]) }]);
+    const ids: string[] = [];
+    for await (const video of createUsersApi(testHttp(mock)).iterateUserVideos(4, { pageSize: 1 })) {
+      ids.push(video.id);
+    }
+    expect(ids).toEqual(["b", "c"]);
+    expect(mock.calls).toHaveLength(3);
+  });
+});

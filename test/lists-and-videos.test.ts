@@ -261,3 +261,31 @@ describe("AccountPublicApi", () => {
     expect(me.userId).toBe("12345678");
   });
 });
+
+describe("regressions from review", () => {
+  it("treats an empty bulk removal as a no-op rather than a bare DELETE", async () => {
+    const items = mockFetch({ json: nvapi({}) });
+    await createMylistsApi(testHttp(items)).removeMylistItems(1, []);
+    expect(items.calls).toHaveLength(0);
+
+    const later = mockFetch({ json: nvapi({}) });
+    await createMylistsApi(testHttp(later)).removeWatchLater([]);
+    expect(later.calls).toHaveLength(0);
+  });
+
+  it("sends every field on update, since the route replaces rather than patches", async () => {
+    const mock = mockFetch({ json: nvapi({}) });
+    await createMylistsApi(testHttp(mock)).updateMylist({
+      mylistId: 1,
+      name: "renamed",
+      description: "kept",
+      isPublic: true,
+      defaultSortKey: "registeredAt",
+      defaultSortOrder: "asc",
+    });
+    const query = mock.query();
+    expect(query.get("isPublic")).toBe("true");
+    expect(query.get("description")).toBe("kept");
+    expect(query.get("defaultSortKey")).toBe("registeredAt");
+  });
+});

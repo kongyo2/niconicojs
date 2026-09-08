@@ -1,4 +1,4 @@
-import { buildQuery, NICOVIDEO_ORIGIN, type NiconicoHttp, type RequestOptions } from "./http.js";
+import { buildQuery, NICOVIDEO_ORIGIN, type NiconicoHttp, type RequestOptions, pickRequestOptions } from "./http.js";
 import type { EssentialVideo, MylistItem, MylistMeta, SortOrder } from "./types.js";
 
 const NVAPI = "https://nvapi.nicovideo.jp";
@@ -55,8 +55,13 @@ export interface CreateMylistParams extends RequestOptions {
   defaultSortOrder?: SortOrder | undefined;
 }
 
-export interface UpdateMylistParams extends CreateMylistParams {
+export interface UpdateMylistParams extends RequestOptions {
   mylistId: number | string;
+  name: string;
+  description: string;
+  isPublic: boolean;
+  defaultSortKey: MylistSortKey;
+  defaultSortOrder: SortOrder;
 }
 
 export interface MylistsApi {
@@ -115,7 +120,7 @@ export function createMylistsApi(http: NiconicoHttp): MylistsApi {
             hasInvisibleItems?: boolean;
           };
         };
-      }>(`${NVAPI}/v2/mylists/${encodeURIComponent(String(mylistId))}${query}`, { signal: params.signal });
+      }>(`${NVAPI}/v2/mylists/${encodeURIComponent(String(mylistId))}${query}`, pickRequestOptions(params));
       const mylist = res.data.mylist;
       const items = mylist.items ?? [];
       return {
@@ -141,7 +146,7 @@ export function createMylistsApi(http: NiconicoHttp): MylistsApi {
       const query = buildQuery({ sampleItemCount: params.sampleItemCount });
       const res = await http.getJson<{
         data: { totalCount?: number; hasNext?: boolean; mylists?: MylistMeta[] };
-      }>(`${NVAPI}/v1/users/me/mylists${query}`, { signal: params.signal });
+      }>(`${NVAPI}/v1/users/me/mylists${query}`, pickRequestOptions(params));
       const mylists = res.data.mylists ?? [];
       return {
         totalCount: res.data.totalCount ?? mylists.length,
@@ -166,7 +171,7 @@ export function createMylistsApi(http: NiconicoHttp): MylistsApi {
             hasNext?: boolean;
           };
         };
-      }>(`${NVAPI}/v1/users/me/watch-later${query}`, { signal: params.signal });
+      }>(`${NVAPI}/v1/users/me/watch-later${query}`, pickRequestOptions(params));
       const watchLater = res.data.watchLater;
       const items = watchLater?.items ?? [];
       return {
@@ -189,7 +194,7 @@ export function createMylistsApi(http: NiconicoHttp): MylistsApi {
         `${NVAPI}/v1/users/me/mylists${query}`,
         "POST",
         undefined,
-        { headers: WRITE_HEADERS, signal: params.signal },
+        { ...pickRequestOptions(params), headers: { ...WRITE_HEADERS, ...params.headers } },
       );
       return res.data?.mylistId ?? 0;
     },
@@ -197,14 +202,16 @@ export function createMylistsApi(http: NiconicoHttp): MylistsApi {
     async updateMylist(params) {
       const query = buildQuery({
         name: params.name,
-        description: params.description ?? "",
-        isPublic: params.isPublic ?? false,
-        defaultSortKey: params.defaultSortKey ?? "addedAt",
-        defaultSortOrder: params.defaultSortOrder ?? "desc",
+        description: params.description,
+        isPublic: params.isPublic,
+        defaultSortKey: params.defaultSortKey,
+        defaultSortOrder: params.defaultSortOrder,
       });
-      await write(`${NVAPI}/v1/users/me/mylists/${encodeURIComponent(String(params.mylistId))}${query}`, "PUT", {
-        signal: params.signal,
-      });
+      await write(
+        `${NVAPI}/v1/users/me/mylists/${encodeURIComponent(String(params.mylistId))}${query}`,
+        "PUT",
+        pickRequestOptions(params),
+      );
     },
 
     async deleteMylist(mylistId, options = {}) {
@@ -213,12 +220,15 @@ export function createMylistsApi(http: NiconicoHttp): MylistsApi {
 
     async addMylistItem(mylistId, watchId, params = {}) {
       const query = buildQuery({ itemId: watchId, description: params.description ?? "" });
-      await write(`${NVAPI}/v1/users/me/mylists/${encodeURIComponent(String(mylistId))}/items${query}`, "POST", {
-        signal: params.signal,
-      });
+      await write(
+        `${NVAPI}/v1/users/me/mylists/${encodeURIComponent(String(mylistId))}/items${query}`,
+        "POST",
+        pickRequestOptions(params),
+      );
     },
 
     async removeMylistItems(mylistId, itemIds, options = {}) {
+      if (itemIds.length === 0) return;
       const query = buildQuery({ itemIds: itemIds.map(String) });
       await write(
         `${NVAPI}/v1/users/me/mylists/${encodeURIComponent(String(mylistId))}/items${query}`,
@@ -232,6 +242,7 @@ export function createMylistsApi(http: NiconicoHttp): MylistsApi {
     },
 
     async removeWatchLater(watchIds, options = {}) {
+      if (watchIds.length === 0) return;
       await write(`${NVAPI}/v1/users/me/watch-later${buildQuery({ watchIds: [...watchIds] })}`, "DELETE", options);
     },
   };

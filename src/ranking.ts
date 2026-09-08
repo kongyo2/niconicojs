@@ -1,5 +1,5 @@
 import { NiconicoError } from "./errors.js";
-import { buildQuery, type NiconicoHttp, type RequestOptions } from "./http.js";
+import { buildQuery, type NiconicoHttp, type RequestOptions, pickRequestOptions } from "./http.js";
 import type { EssentialVideo } from "./types.js";
 
 export type RankingTerm = "hour" | "24h" | "week" | "month" | "total";
@@ -106,8 +106,8 @@ export function createRankingApi(http: NiconicoHttp): RankingApi {
       page: params.page,
     });
     return http.getJson<BffResponse>(`${base}/${encodeURIComponent(featuredKey)}${query}`, {
+      ...pickRequestOptions(params),
       validateMeta: false,
-      signal: params.signal,
     });
   }
 
@@ -146,6 +146,7 @@ export function createRankingApi(http: NiconicoHttp): RankingApi {
     },
 
     async *iterateRanking(params = {}) {
+      if (params.maxItems !== undefined && params.maxItems <= 0) return;
       let page = params.page ?? 1;
       let yielded = 0;
       for (;;) {

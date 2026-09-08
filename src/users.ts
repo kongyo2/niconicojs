@@ -1,4 +1,4 @@
-import { buildQuery, type NiconicoHttp, type RequestOptions } from "./http.js";
+import { buildQuery, type NiconicoHttp, type RequestOptions, pickRequestOptions } from "./http.js";
 import type {
   EssentialVideo,
   MinimalUser,
@@ -104,7 +104,7 @@ export function createUsersApi(http: NiconicoHttp): UsersApi {
     return http
       .getJson<{ data: { items?: FollowUser[]; summary?: FollowSummary } }>(
         `${NVAPI}/v1/users/${userPathSegment(userId)}/${kind}/users${query}`,
-        { signal: params.signal },
+        pickRequestOptions(params),
       )
       .then((res) => ({ items: res.data.items ?? [], summary: res.data.summary ?? {} }));
   }
@@ -149,7 +149,7 @@ export function createUsersApi(http: NiconicoHttp): UsersApi {
           totalCount?: number;
           items?: Array<{ series?: unknown; essential?: EssentialVideo }>;
         };
-      }>(`${NVAPI}/v3/users/${userPathSegment(userId)}/videos${query}`, { signal: params.signal });
+      }>(`${NVAPI}/v3/users/${userPathSegment(userId)}/videos${query}`, pickRequestOptions(params));
       const items = (res.data.items ?? [])
         .map((entry) => entry.essential)
         .filter((video): video is EssentialVideo => video !== undefined);
@@ -160,7 +160,7 @@ export function createUsersApi(http: NiconicoHttp): UsersApi {
       const query = buildQuery({ pageSize: params.pageSize, page: params.page });
       const res = await http.getJson<{ data: { totalCount?: number; items?: SeriesMeta[] } }>(
         `${NVAPI}/v1/users/${userPathSegment(userId)}/series${query}`,
-        { signal: params.signal },
+        pickRequestOptions(params),
       );
       const items = res.data.items ?? [];
       return { totalCount: res.data.totalCount ?? items.length, items };
@@ -170,7 +170,7 @@ export function createUsersApi(http: NiconicoHttp): UsersApi {
       const query = buildQuery({ sampleItemCount: params.sampleItemCount });
       const res = await http.getJson<{
         data: { totalCount?: number; hasNext?: boolean; mylists?: MylistMeta[] };
-      }>(`${NVAPI}/v1/users/${userPathSegment(userId)}/mylists${query}`, { signal: params.signal });
+      }>(`${NVAPI}/v1/users/${userPathSegment(userId)}/mylists${query}`, pickRequestOptions(params));
       const mylists = res.data.mylists ?? [];
       return {
         totalCount: res.data.totalCount ?? mylists.length,
@@ -205,13 +205,12 @@ export function createUsersApi(http: NiconicoHttp): UsersApi {
 
     async *iterateUserVideos(userId, params = {}) {
       const pageSize = params.pageSize ?? 100;
-      let page = params.page ?? 1;
-      let seen = 0;
+      const firstPage = params.page ?? 1;
+      let page = firstPage;
       for (;;) {
         const result = await api.getUserVideos(userId, { ...params, pageSize, page });
         for (const video of result.items) yield video;
-        seen += result.items.length;
-        if (result.items.length === 0 || seen >= result.totalCount) return;
+        if (page * pageSize >= result.totalCount) return;
         page += 1;
       }
     },

@@ -1,4 +1,4 @@
-import { buildQuery, type NiconicoHttp, type RequestOptions } from "./http.js";
+import { buildQuery, type NiconicoHttp, type RequestOptions, pickRequestOptions } from "./http.js";
 import type { EssentialVideo } from "./types.js";
 
 const NVAPI = "https://nvapi.nicovideo.jp";
@@ -40,7 +40,7 @@ export function createHistoryApi(http: NiconicoHttp): HistoryApi {
       });
       const res = await http.getJson<{ data?: { items?: WatchHistoryItem[]; nextCursor?: string } }>(
         `${base}${query}`,
-        { signal: params.signal },
+        pickRequestOptions(params),
       );
       return { items: res.data?.items ?? [], nextCursor: res.data?.nextCursor };
     },

@@ -1,5 +1,5 @@
 import { NiconicoError } from "./errors.js";
-import type { NiconicoHttp, RequestOptions } from "./http.js";
+import { pickRequestOptions, type NiconicoHttp, type RequestOptions } from "./http.js";
 
 const BASE = "https://snapshot.search.nicovideo.jp/api/v2/snapshot/video/contents/search";
 
@@ -138,8 +138,8 @@ export function createSnapshotApi(http: NiconicoHttp): SnapshotApi {
 
       const url = `${BASE}?${search.toString()}`;
       const res = await http.getJson<SnapshotSearchResult>(url, {
+        ...pickRequestOptions(params),
         validateMeta: false,
-        signal: params.signal,
       });
       if (res.meta.status >= 400) {
         throw new NiconicoError(`snapshot search failed: ${res.meta.status} (id=${res.meta.id})`);
@@ -148,6 +148,7 @@ export function createSnapshotApi(http: NiconicoHttp): SnapshotApi {
     },
 
     async *iterate(params) {
+      if (params.maxItems !== undefined && params.maxItems <= 0) return;
       const limit = params.limit ?? 100;
       let offset = params.offset ?? 0;
       let yielded = 0;

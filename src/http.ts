@@ -13,6 +13,11 @@ export type HttpMethod = "GET" | "POST" | "PUT" | "DELETE";
 
 export type FetchLike = (input: string, init: RequestInit) => Promise<Response>;
 
+export interface RawResponse {
+  response: Response;
+  text: string;
+}
+
 export interface NiconicoHttpOptions {
   session?: string | undefined;
   frontendId?: FrontendId | undefined;
@@ -64,6 +69,27 @@ function isTransientStatus(status: number): boolean {
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason;
+}
+
+function abortableSleep(ms: number, maybeSignal: AbortSignal | undefined): Promise<void> {
+  if (maybeSignal === undefined) return sleep(ms);
+  const signal = maybeSignal;
+  if (signal.aborted) return Promise.reject(abortReason(signal));
+  return new Promise((resolve, reject) => {
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(abortReason(signal));
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
 
 export class RateLimiter {
   private lastAt = 0;
@@ -134,7 +160,7 @@ export class NiconicoHttp {
     body: string | undefined,
     extraHeaders: Record<string, string> | undefined,
     signal: AbortSignal | undefined,
-  ): Promise<Response> {
+  ): Promise<RawResponse> {
     const timeout = AbortSignal.timeout(this.timeoutMs);
     const composed = signal === undefined ? timeout : AbortSignal.any([signal, timeout]);
     const headers: Record<string, string> = { ...this.baseHeaders(), ...extraHeaders };
@@ -143,7 +169,8 @@ export class NiconicoHttp {
       init.body = body;
     }
     try {
-      return await this.fetchImpl(url, init);
+      const response = await this.fetchImpl(url, init);
+      return { response, text: await response.text() };
     } catch (error) {
       if (signal?.aborted === true) throw error;
       if (timeout.aborted) throw new NiconicoTimeoutError(url, this.timeoutMs);
@@ -160,7 +187,7 @@ export class NiconicoHttp {
       rateLimitMs?: number | undefined;
       idempotent?: boolean | undefined;
     } = {},
-  ): Promise<Response> {
+  ): Promise<RawResponse> {
     const method = init.method ?? "GET";
     const retryable = options.idempotent ?? method === "GET";
     const maxAttempts = retryable ? this.retryAttempts : 1;
@@ -171,12 +198,11 @@ export class NiconicoHttp {
         await commentRateLimiter.acquire(options.rateLimitMs);
       }
       try {
-        const response = await this.requestOnce(url, method, init.body, extraHeaders, options.signal);
-        if (!isTransientStatus(response.status)) {
-          return response;
+        const raw = await this.requestOnce(url, method, init.body, extraHeaders, options.signal);
+        if (!isTransientStatus(raw.response.status)) {
+          return raw;
         }
-        await response.text().catch(() => "");
-        throw new RetryableHttpError(response.status, url, parseRetryAfterMs(response.headers));
+        throw new RetryableHttpError(raw.response.status, url, parseRetryAfterMs(raw.response.headers));
       } catch (error) {
         if (options.signal?.aborted === true) throw error;
         if (error instanceof NiconicoTimeoutError && !retryable) throw error;
@@ -185,7 +211,7 @@ export class NiconicoHttp {
         if (isLast) break;
         const retryAfter = error instanceof RetryableHttpError ? error.retryAfterMs : undefined;
         const backoff = Math.min(this.retryBaseDelayMs * 2 ** attempt, 8000);
-        await sleep(retryAfter ?? backoff + Math.random() * 250);
+        await abortableSleep(retryAfter ?? backoff + Math.random() * 250, options.signal);
       }
     }
 
@@ -199,12 +225,12 @@ export class NiconicoHttp {
   }
 
   async getJson<T>(url: string, options: RequestOptions = {}): Promise<T> {
-    const response = await this.request(url, { method: "GET" }, options.headers, {
+    const raw = await this.request(url, { method: "GET" }, options.headers, {
       signal: options.signal,
       rateLimitMs: options.rateLimitMs,
       idempotent: options.idempotent ?? true,
     });
-    return this.parseJsonResponse<T>(url, response, options.validateMeta !== false);
+    return this.parseJsonResponse<T>(url, raw, options.validateMeta !== false);
   }
 
   async sendJson<T>(
@@ -219,12 +245,12 @@ export class NiconicoHttp {
       init.body = JSON.stringify(body);
       headers["Content-Type"] = "application/json";
     }
-    const response = await this.request(url, init, headers, {
+    const raw = await this.request(url, init, headers, {
       signal: options.signal,
       rateLimitMs: options.rateLimitMs,
       idempotent: options.idempotent,
     });
-    return this.parseJsonResponse<T>(url, response, options.validateMeta !== false);
+    return this.parseJsonResponse<T>(url, raw, options.validateMeta !== false);
   }
 
   async postJson<T>(url: string, body: unknown, options: RequestOptions = {}): Promise<T> {
@@ -232,19 +258,20 @@ export class NiconicoHttp {
   }
 
   async getText(url: string, options: Omit<RequestOptions, "validateMeta"> = {}): Promise<string> {
-    const response = await this.request(url, { method: "GET" }, options.headers, {
+    const raw = await this.request(url, { method: "GET" }, options.headers, {
       signal: options.signal,
       rateLimitMs: options.rateLimitMs,
       idempotent: options.idempotent ?? true,
     });
-    if (!response.ok) {
-      throw new NiconicoApiError(url, { status: response.status });
+    if (!raw.response.ok) {
+      throw new NiconicoApiError(url, { status: raw.response.status });
     }
-    return response.text();
+    return raw.text;
   }
 
-  async parseJsonResponse<T>(url: string, response: Response, validateMeta: boolean): Promise<T> {
-    const text = await response.text();
+  // oxlint-disable-next-line typescript/no-unnecessary-type-parameters
+  parseJsonResponse<T>(url: string, raw: RawResponse, validateMeta: boolean): T {
+    const { response, text } = raw;
     let parsed: unknown;
     try {
       parsed = text.length > 0 ? JSON.parse(text) : undefined;
@@ -319,6 +346,16 @@ export function readCookieValue(response: Response, name: string): string | unde
   return undefined;
 }
 
+export function pickRequestOptions(params: Readonly<Partial<RequestOptions>>): RequestOptions {
+  const options: RequestOptions = {};
+  if (params.headers !== undefined) options.headers = params.headers;
+  if (params.signal !== undefined) options.signal = params.signal;
+  if (params.validateMeta !== undefined) options.validateMeta = params.validateMeta;
+  if (params.rateLimitMs !== undefined) options.rateLimitMs = params.rateLimitMs;
+  if (params.idempotent !== undefined) options.idempotent = params.idempotent;
+  return options;
+}
+
 export function buildQuery(
   params: Readonly<Record<string, string | number | boolean | readonly string[] | undefined>>,
 ): string {
@@ -338,7 +375,7 @@ export function buildQuery(
 export function extractUserSession(input: string): string | undefined {
   const value = input.trim().replace(/^cookie:\s*/i, "");
   if (value.length === 0) return undefined;
-  const match = value.match(/user_session=([^;\s]+)/i);
+  const match = value.match(/(?:^|[;,]\s*)user_session=([^;\s]+)/i);
   if (match?.[1] !== undefined) {
     return match[1];
   }

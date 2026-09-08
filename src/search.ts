@@ -1,5 +1,5 @@
 import { NiconicoError } from "./errors.js";
-import { buildQuery, type NiconicoHttp, type RequestOptions } from "./http.js";
+import { buildQuery, type NiconicoHttp, type RequestOptions, pickRequestOptions } from "./http.js";
 import type { EssentialVideo, Genre, MinimalUser, Owner, SensitiveContents } from "./types.js";
 
 const NVAPI = "https://nvapi.nicovideo.jp";
@@ -168,7 +168,7 @@ export function createSearchApi(http: NiconicoHttp): SearchApi {
           items?: EssentialVideo[];
           additionals?: { tags?: SearchAdditionalTag[] };
         };
-      }>(`${NVAPI}/v2/search/video${query}`, { signal: params.signal });
+      }>(`${NVAPI}/v2/search/video${query}`, pickRequestOptions(params));
       return {
         searchId: res.data.searchId,
         keyword: res.data.keyword,
@@ -196,7 +196,7 @@ export function createSearchApi(http: NiconicoHttp): SearchApi {
       });
       const res = await http.getJson<{ data: { items?: Array<{ genre: Genre; count: number }> } }>(
         `${NVAPI}/v2/search/facet${query}`,
-        { signal: params.signal },
+        pickRequestOptions(params),
       );
       return { items: res.data.items ?? [] };
     },
@@ -210,7 +210,7 @@ export function createSearchApi(http: NiconicoHttp): SearchApi {
       });
       const res = await http.getJson<{
         data: { requestId: string; totalCount?: number; hasNext?: boolean; items?: SearchUser[] };
-      }>(`${NVAPI}/v1/search/user${query}`, { signal: params.signal });
+      }>(`${NVAPI}/v1/search/user${query}`, pickRequestOptions(params));
       return {
         requestId: res.data.requestId,
         totalCount: res.data.totalCount ?? 0,
@@ -229,7 +229,7 @@ export function createSearchApi(http: NiconicoHttp): SearchApi {
       });
       const res = await http.getJson<{
         data: { searchId: string; totalCount?: number; hasNext?: boolean; items?: SearchListItem[] };
-      }>(`${NVAPI}/v1/search/list${query}`, { signal: params.signal });
+      }>(`${NVAPI}/v1/search/list${query}`, pickRequestOptions(params));
       return {
         searchId: res.data.searchId,
         totalCount: res.data.totalCount ?? 0,
@@ -246,7 +246,7 @@ export function createSearchApi(http: NiconicoHttp): SearchApi {
       });
       const res = await http.getJson<{
         data: { hasNext?: boolean; items?: EssentialVideo[]; createdAt?: string | null };
-      }>(`${NVAPI}/v1/new-arrival/videos${query}`, { signal: params.signal });
+      }>(`${NVAPI}/v1/new-arrival/videos${query}`, pickRequestOptions(params));
       return {
         hasNext: res.data.hasNext ?? false,
         items: res.data.items ?? [],
@@ -255,6 +255,7 @@ export function createSearchApi(http: NiconicoHttp): SearchApi {
     },
 
     async *iterateVideos(params = {}) {
+      if (params.maxItems !== undefined && params.maxItems <= 0) return;
       const pageSize = params.pageSize ?? 100;
       let page = params.page ?? 1;
       let yielded = 0;

@@ -4,7 +4,7 @@ Unofficial TypeScript client for the [niconico](https://www.nicovideo.jp) (nicov
 
 Every endpoint in this library was probed against the live service and the behaviour documented here reflects what it actually does today, not what the published unofficial docs say. Several of those docs are stale; the [API notes](#api-notes) section records where they diverge.
 
-- **No runtime surprises.** Guest access works for every read endpoint; a session cookie unlocks the rest.
+- **No runtime surprises.** Every *public* read works as a guest; a session cookie unlocks the `me`-scoped reads (own mylists, watch-later, history, likes, follow feed), comment history, storyboards and the write endpoints.
 - **Typed against real responses.** Shapes were taken from live payloads, not from examples.
 - **Strict by construction.** `strict` + `noUncheckedIndexedAccess` + `exactOptionalPropertyTypes` + `isolatedDeclarations`, with `oxlint` type-aware lint clean.
 
@@ -14,7 +14,7 @@ Every endpoint in this library was probed against the live service and the behav
 npm add @kongyo2/niconicojs
 ```
 
-Requires Node 20+ (uses `fetch`, `AbortSignal.any` and `Headers.getSetCookie`).
+Requires Node 20.3+ (`AbortSignal.any`, which composes the request timeout with a caller's signal, landed in 20.3.0; `fetch` and `Headers.getSetCookie` are also used).
 
 The published types name the Web platform types this client exposes (`Response`, `AbortSignal`, `RequestInit`), so your TypeScript project needs them available: either `@types/node` (declared as an optional peer dependency) or `"lib": ["dom"]` for browser and bundler targets.
 
@@ -33,6 +33,10 @@ const { items, totalCount } = await nico.search.searchVideos({
 });
 console.log(totalCount, items[0]?.title);
 ```
+
+### What needs a session
+
+Guest access covers search, ranking, users, videos, mylists and series by id, watch data, the initial comment payload and HLS playback. A `user_session` cookie is required for anything scoped to *your* account — `getMyMylists`, `getMyWatchLater`, `getMyWatchHistory`, `getMyLikes`, the follow feed — and for comment history (`fetchAllComments`), storyboards, and every write.
 
 ### Authenticating
 

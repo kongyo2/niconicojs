@@ -1,5 +1,5 @@
 import { NiconicoError } from "./errors.js";
-import { buildQuery, type NiconicoHttp, type RequestOptions } from "./http.js";
+import { buildQuery, type NiconicoHttp, type RequestOptions, pickRequestOptions } from "./http.js";
 
 const FEED = "https://api.feed.nicovideo.jp";
 
@@ -64,8 +64,8 @@ export function createFeedApi(http: NiconicoHttp): FeedApi {
     async getActors(params = {}) {
       const url = `${FEED}/v1/actors${buildQuery({ limit: clampLimit(params.limit, FEED_MAX_LIMIT) })}`;
       const res = await http.getJson<{ code?: string; actors?: FeedActor[] }>(url, {
+        ...pickRequestOptions(params),
         validateMeta: false,
-        signal: params.signal,
       });
       assertFeedOk(url, res.code);
       return res.actors ?? [];
@@ -82,7 +82,7 @@ export function createFeedApi(http: NiconicoHttp): FeedApi {
         activities?: FeedActivity[];
         impressionId?: string;
         nextCursor?: string;
-      }>(url, { validateMeta: false, signal: params.signal });
+      }>(url, { ...pickRequestOptions(params), validateMeta: false });
       assertFeedOk(url, res.code);
       return {
         activities: res.activities ?? [],

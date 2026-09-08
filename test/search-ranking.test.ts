@@ -269,3 +269,24 @@ describe("SuggestionApi", () => {
     expect(mock.only().url).toBe("https://sug.search.nicovideo.jp/suggestion/expand/%E5%88%9D%E9%9F%B3");
   });
 });
+
+describe("regressions from review", () => {
+  it("makes no request at all when maxItems is zero or negative", async () => {
+    const search = mockFetch({ json: nvapi({ searchId: "s", keyword: "k", tag: null, items: [] }) });
+    for await (const _ of createSearchApi(testHttp(search)).iterateVideos({ keyword: "k", maxItems: 0 })) {
+      throw new Error("should not yield");
+    }
+    expect(search.calls).toHaveLength(0);
+
+    const snap = mockFetch({ json: { meta: { status: 200, totalCount: 0, id: "x" }, data: [] } });
+    for await (const _ of createSnapshotApi(testHttp(snap)).iterate({
+      q: "x",
+      targets: "title",
+      fields: "contentId",
+      maxItems: 0,
+    })) {
+      throw new Error("should not yield");
+    }
+    expect(snap.calls).toHaveLength(0);
+  });
+});

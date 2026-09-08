@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { NiconicoClient } from "../src/client.js";
 import { createAuthApi, LOGIN_PAGE_URL, NiconicoAuthError } from "../src/auth.js";
 import { createAccountPublicApi } from "../src/account-public.js";
-import { NiconicoError } from "../src/errors.js";
+import { NiconicoApiError, NiconicoError } from "../src/errors.js";
 import { mockFetch, nvapi, testHttp } from "./helpers.js";
 
 const RAW_SESSION = "user_session_12345678_0000000000000000000000000000000000000000000000000000000000000000";
@@ -137,5 +137,14 @@ describe("comment resolver wiring", () => {
     const mock = mockFetch({ json: nvapi({ video: { id: "sm9" }, comment: { nvComment: null } }) });
     const nico = new NiconicoClient({ fetch: mock.fetch, retryAttempts: 1 });
     await expect(nico.comments.fetchCommentsByVideoId("sm9")).rejects.toThrow(/no nvComment credentials/);
+  });
+});
+
+describe("regressions from review", () => {
+  it("propagates a server error instead of calling the session invalid", async () => {
+    const mock = mockFetch({ status: 500, json: { meta: { status: 500 } } });
+    const http = testHttp(mock, { session: RAW_SESSION });
+    const api = createAuthApi(http, createAccountPublicApi(http));
+    await expect(api.isSessionValid()).rejects.toBeInstanceOf(NiconicoApiError);
   });
 });

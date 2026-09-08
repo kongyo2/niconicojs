@@ -258,11 +258,12 @@ export function createCommentsApi(http: NiconicoHttp, resolveWatchThreads: Watch
 
       for (const target of ordered) {
         if (reachedLimit) break;
+        options.signal?.throwIfAborted();
         let when = options.startWhenUnixSec ?? Math.floor(Date.now() / 1000);
         let lowestSeenNo = Number.POSITIVE_INFINITY;
 
         for (let round = 0; round < maxRounds; round += 1) {
-          if (options.signal?.aborted === true) break;
+          options.signal?.throwIfAborted();
 
           const threads = await api.fetchCommentsWithKey(nvComment.threadKey, [target], {
             language: nvComment.params.language,

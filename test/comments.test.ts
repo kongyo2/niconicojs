@@ -262,3 +262,14 @@ describe("postComment", () => {
     expect(mock.calls).toHaveLength(1);
   });
 });
+
+describe("regressions from review", () => {
+  it("rejects on cancellation instead of resolving with a partial archive", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const mock = mockFetch({ json: threadBody("main", comments(1, 1)) });
+    const api = createCommentsApi(testHttp(mock), noResolver);
+    await expect(api.fetchAllComments(nvComment, { signal: controller.signal })).rejects.toBeTruthy();
+    expect(mock.calls).toHaveLength(0);
+  });
+});

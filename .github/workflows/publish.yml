@@ -70,14 +70,20 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "Publishing $version under dist-tag '${{ inputs.tag }}'"
 
-      - name: Fail if the version is already on npm
+      # npm publish is irreversible, but the git tag and GitHub release that
+      # follow it can fail. A rerun must be able to finish those, so an
+      # already-published version skips the upload instead of failing the job.
+      - name: Check whether this version is already on npm
+        id: published
         run: |
           set -euo pipefail
           name="$(node -p "require('./package.json').name")"
           version='${{ steps.version.outputs.version }}'
           if npm view "$name@$version" version >/dev/null 2>&1; then
-            echo "::error::$name@$version is already published. Pick a new version."
-            exit 1
+            echo "::warning::$name@$version is already on npm; skipping the upload and completing the release steps."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
       # Builds via prepack, then checks the tarball resolves for both
@@ -86,7 +92,7 @@ jobs:
         run: npm run verify:package
 
       - name: Publish
-        if: ${{ !inputs.dry_run }}
+        if: ${{ !inputs.dry_run && steps.published.outputs.exists == 'false' }}
         run: npm publish --access public --provenance --tag '${{ inputs.tag }}'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -96,14 +102,25 @@ jobs:
         run: |
           set -euo pipefail
           version='${{ steps.version.outputs.version }}'
-          git add package.json package-lock.json
-          git commit -m "chore(release): v$version"
-          git tag "v$version"
+          if ! git diff --quiet -- package.json package-lock.json; then
+            git add package.json package-lock.json
+            git commit -m "chore(release): v$version"
+          fi
+          if ! git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            git tag "v$version"
+          fi
           git push origin HEAD --follow-tags
 
       - name: Create the GitHub release
         if: ${{ !inputs.dry_run && inputs.version != 'current' }}
-        run: gh release create "v${{ steps.version.outputs.version }}" --generate-notes
+        run: |
+          set -euo pipefail
+          version='${{ steps.version.outputs.version }}'
+          if gh release view "v$version" >/dev/null 2>&1; then
+            echo "Release v$version already exists; nothing to do."
+          else
+            gh release create "v$version" --generate-notes
+          fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
