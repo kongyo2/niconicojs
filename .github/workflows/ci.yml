@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # The same command contributors run locally, so a green run here means
+      # the same thing it means on a laptop.
+      - run: npm run check
+      - run: npm run lint:types
+      - run: npm run comments:check
+
+  live:
+    # Reaches nicovideo.jp, so it never gates a pull request.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run verify:live
+        env:
+          NICONICO_SESSION: ${{ secrets.NICONICO_SESSION }}

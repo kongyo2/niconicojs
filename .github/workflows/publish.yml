@@ -1,0 +1,117 @@
+name: Publish to npm
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish: a semver bump (patch/minor/major/prerelease), an exact version (1.2.3), or "current" to publish package.json as-is'
+        required: true
+        default: current
+        type: string
+      tag:
+        description: "npm dist-tag to publish under"
+        required: true
+        default: latest
+        type: choice
+        options:
+          - latest
+          - next
+          - beta
+      dry_run:
+        description: "Run every step but stop short of publishing"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - run: npm ci
+
+      - name: Verify the release candidate
+        run: |
+          npm run check
+          npm run lint:types
+          npm run comments:check
+
+      - name: Resolve the version to publish
+        id: version
+        run: |
+          set -euo pipefail
+          input='${{ inputs.version }}'
+          if [ "$input" = "current" ]; then
+            version="$(node -p "require('./package.json').version")"
+          else
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            version="$(npm version "$input" --no-git-tag-version | tr -d 'v')"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Publishing $version under dist-tag '${{ inputs.tag }}'"
+
+      - name: Fail if the version is already on npm
+        run: |
+          set -euo pipefail
+          name="$(node -p "require('./package.json').name")"
+          version='${{ steps.version.outputs.version }}'
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "::error::$name@$version is already published. Pick a new version."
+            exit 1
+          fi
+
+      # Builds via prepack, then checks the tarball resolves for both
+      # module systems before anything is uploaded.
+      - name: Validate the package tarball
+        run: npm run verify:package
+
+      - name: Publish
+        if: ${{ !inputs.dry_run }}
+        run: npm publish --access public --provenance --tag '${{ inputs.tag }}'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Commit the version bump and tag it
+        if: ${{ !inputs.dry_run && inputs.version != 'current' }}
+        run: |
+          set -euo pipefail
+          version='${{ steps.version.outputs.version }}'
+          git add package.json package-lock.json
+          git commit -m "chore(release): v$version"
+          git tag "v$version"
+          git push origin HEAD --follow-tags
+
+      - name: Create the GitHub release
+        if: ${{ !inputs.dry_run && inputs.version != 'current' }}
+        run: gh release create "v${{ steps.version.outputs.version }}" --generate-notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Summary
+        run: |
+          {
+            echo "### ${{ inputs.dry_run && 'Dry run' || 'Published' }}"
+            echo ""
+            echo "- version: \`${{ steps.version.outputs.version }}\`"
+            echo "- dist-tag: \`${{ inputs.tag }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
