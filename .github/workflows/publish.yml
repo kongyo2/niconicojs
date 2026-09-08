@@ -100,10 +100,18 @@ jobs:
             git add package.json package-lock.json
             git commit -m "chore(release): v$version"
           fi
+          # Annotated, because --follow-tags and `gh release create` both
+          # ignore a lightweight tag.
           if ! git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
-            git tag "v$version"
+            git tag -a "v$version" -m "v$version"
           fi
-          git push origin HEAD --follow-tags
+          # The tag travels as its own refspec rather than riding along with
+          # --follow-tags, which pushes nothing at all when the branch is
+          # already up to date — the case a `current` release always hits.
+          git push origin HEAD "refs/tags/v$version"
+          # The publish below cannot be undone, so confirm the tag reached the
+          # remote instead of trusting that the push said it did.
+          git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null
 
       - name: Check whether this version is already on npm
         id: published

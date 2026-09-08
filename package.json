@@ -1,6 +1,6 @@
 {
   "name": "@kongyo2/niconicojs",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Unofficial TypeScript client library for Niconico (nicovideo.jp) web APIs — videos, search, ranking, mylists, series, users, comments, and DMS/HLS streaming.",
   "type": "module",
   "publishConfig": {
