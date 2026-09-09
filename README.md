@@ -95,9 +95,9 @@ user_session=user_session_12345678_abcdef…
 Cookie: nicosid=1.2; user_session=user_session_12345678_abcdef…
 ```
 
-A value it cannot parse throws at construction rather than silently falling back to guest access. Two safety properties worth knowing:
+A non-empty value it cannot parse throws at construction rather than silently falling back to guest access. An **unset or blank** `session` — the usual result of an empty environment variable — is treated as deliberate guest mode instead, so call `verifySession()` at startup when your code requires authentication. Two more properties worth knowing:
 
-- The cookie is only ever attached to requests bound for `*.nicovideo.jp` / `nico.ms` hosts — a custom `fetch` or redirect can't leak it elsewhere.
+- The client attaches the cookie only to requests bound for `*.nicovideo.jp` / `nico.ms` hosts, so it never sends it to another origin. A replacement `fetch` does receive those headers on niconico requests, though — treat a custom `fetch` as trusted code.
 - `verifySession()` distinguishes "no cookie configured" from "cookie rejected" (`NiconicoAuthError` either way); `isSessionValid()` is the boolean version for health checks.
 
 > ⚠️ A `user_session` value is a live credential with full account access. Keep it in an environment variable or secret store, never in code.
@@ -177,18 +177,19 @@ console.log(await playlist.text()); // #EXTM3U …
 To pick quality yourself:
 
 ```ts
-import { pickBestVideo, pickAudioForVideo } from "@kongyo2/niconicojs";
+import { pickBestVideo, pickBestAudio, pickAudioForVideo } from "@kongyo2/niconicojs";
 
 const domand = watch.data.media.domand;
 if (domand?.accessRightKey != null) {
-  const video = pickBestVideo(domand);
-  const audio = video && pickAudioForVideo(domand, video);
+  const video = pickBestVideo(domand); // undefined on audio-only media
+  const audio = video === undefined ? pickBestAudio(domand) : pickAudioForVideo(domand, video);
+  if (audio === undefined) throw new Error("no playable stream");
   const hls = await nico.streaming.createHlsAccessRights({
     videoId: watch.data.video.id,
     accessRightKey: domand.accessRightKey,
     actionTrackId: watch.actionTrackId, // must match the watch call
     videoStreamId: video?.id,
-    audioStreamId: audio!.id,
+    audioStreamId: audio.id, // audio-only sessions are valid; audio is always required
   });
 }
 ```
@@ -215,7 +216,7 @@ const all = await authed.comments.fetchAllComments(watch.data.comment.nvComment!
 });
 ```
 
-Each `CommentThread` is tagged with its fork (`main`, `owner`, `easy` — easy comments are excluded unless `includeEasy: true`), and `sortCommentsByVpos` orders items by playback position. Posting resolves the post key for you:
+Each `CommentThread` is tagged with its fork (`main`, `owner`, `easy`). `fetchCommentsByVideoId` and `fetchAllComments` skip the easy fork unless you pass `includeEasy: true`; the lower-level `fetchComments` requests exactly the targets in `nvComment.params.targets`, easy included — filter the targets yourself if you don't want it. `sortCommentsByVpos` orders items by playback position. Posting resolves the post key for you:
 
 ```ts
 const main = watch.data.comment.nvComment!.params.targets.find((target) => target.fork === "main")!;
@@ -289,7 +290,7 @@ for await (const entry of nico.history.iterateMyWatchHistory()) {
 }
 ```
 
-The full set: `search.iterateVideos`, `snapshot.iterate`, `ranking.iterateRanking`, `mylists.iterateMylistItems`, `series.iterateSeriesItems`, `users.iterateUserVideos` / `iterateUserFollowing` / `iterateUserFollowedBy`, `history.iterateMyWatchHistory`, and `feed.iterateFollowingsVideo`. Each accepts `maxItems` (or stops at the natural end) and stops cleanly on `break`.
+The full set: `search.iterateVideos`, `snapshot.iterate`, `ranking.iterateRanking`, `mylists.iterateMylistItems`, `series.iterateSeriesItems`, `users.iterateUserVideos` / `iterateUserFollowing` / `iterateUserFollowedBy`, `history.iterateMyWatchHistory`, and `feed.iterateFollowingsVideo`. The three unbounded corpora — `search.iterateVideos`, `snapshot.iterate`, and `ranking.iterateRanking` — accept `maxItems`; the rest run to the natural end of the listing. Every iterator stops cleanly on `break`, which is how you cap the others.
 
 ### Cancellation, timeouts, custom fetch
 
@@ -419,7 +420,7 @@ Each module is also exported standalone (`createSearchApi(http)`, …) if you wa
 | `headers` | `{}` | Extra headers merged into every request |
 | `fetch` | `globalThis.fetch` | Replacement `fetch` for proxies, logging, or tests |
 
-Per-request, every method threads through `RequestOptions`:
+Per-request, most methods thread through `RequestOptions` (a few with specialized option bags — `fetchAllComments`, `getHlsFromWatch` / `getStoryboardFromWatch`, and the access-rights calls — accept `signal` but not the rest):
 
 | Option | Description |
 | --- | --- |
@@ -446,7 +447,7 @@ try {
 }
 ```
 
-All errors extend `NiconicoError`, so one `instanceof` (or `isNiconicoError`) catches everything the library throws:
+Every error the library itself raises extends `NiconicoError`, so one `instanceof` (or `isNiconicoError`) catches them all. The one deliberate exception is cancellation you asked for: when a caller's `AbortSignal` fires, the promise rejects with that signal's own reason — typically a `DOMException` named `AbortError` — so an abort is never disguised as a network failure. Branch on `error.name === "AbortError"` (or check your signal) for that case.
 
 | Error | Raised when |
 | --- | --- |
@@ -469,7 +470,7 @@ All errors extend `NiconicoError`, so one `instanceof` (or `isNiconicoError`) ca
 
 ## Using modules without the client
 
-Every accessor is a standalone factory over the HTTP layer, so you can pull in exactly one surface:
+Almost every accessor is a standalone factory over a shared HTTP layer, so you can pull in exactly one surface:
 
 ```ts
 import { NiconicoHttp, createSearchApi } from "@kongyo2/niconicojs";
@@ -478,6 +479,8 @@ const http = new NiconicoHttp({ timeoutMs: 10_000 });
 const search = createSearchApi(http);
 const result = await search.searchVideos({ keyword: "初音ミク" });
 ```
+
+Two factories take a collaborator beyond `http`: `createAuthApi(http, accountPublic)` verifies sessions through the account API, and `createCommentsApi(http, resolveWatchThreads)` needs a `WatchThreadResolver` (video id → `NvCommentParams`, usually backed by a watch call) for its by-video-id convenience method. `NiconicoClient` wires both for you.
 
 And for endpoints the library does not wrap, `nico.http` speaks nvapi natively — correct headers, session cookie, retries, and `meta.status` validation included:
 
@@ -506,7 +509,7 @@ Constants: `NICOVIDEO_ORIGIN`, `RANKING_ALL_KEY` (総合), `FEED_MAX_LIMIT` (50)
 
 ## API notes
 
-Findings from live probing (2026-09-08). These are the places where the service diverges from the [niconicolibs unofficial docs](https://github.com/niconicolibs/api), and each one is exercised by the live test suite.
+Findings from live probing (2026-09-08). These are the places where the service diverges from the [niconicolibs unofficial docs](https://github.com/niconicolibs/api). The behaviors the library relies on day to day — the ranking BFF, per-id video lookup, comment-history and storyboard gating — are exercised by the live test suite; the one-shot probe results (the login flow, retired endpoints, the write block) are recorded here as of that date and are not re-verified on every run.
 
 **Login is Turnstile-gated.** `POST account.nicovideo.jp/api/v1/login` returns 404; `/login` redirects to `/spa/login/index.html`, which posts to `api.id.nicovideo.jp` behind Cloudflare Turnstile. Password login is not possible headlessly.
 
