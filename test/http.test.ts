@@ -279,6 +279,32 @@ describe("TokenBucket", () => {
     await expect(quick.acquire()).resolves.toBeUndefined();
   });
 
+  it("rejects a queued acquisition as soon as its signal aborts, without holding up the queue", async () => {
+    const bucket = new TokenBucket(1, 5);
+    await bucket.acquire();
+    const started = Date.now();
+    const ahead = bucket.acquire();
+    const controller = new AbortController();
+    const behind = bucket.acquire(controller.signal);
+    const after = bucket.acquire();
+    controller.abort(new Error("caller gave up"));
+    await expect(behind).rejects.toThrow("caller gave up");
+    expect(Date.now() - started).toBeLessThan(100);
+    await ahead;
+    await after;
+    expect(Date.now() - started).toBeLessThan(550);
+  });
+
+  it("rejects at once, without queueing, when the signal has already aborted", async () => {
+    const bucket = new TokenBucket(1, 0.01);
+    await bucket.acquire();
+    const controller = new AbortController();
+    controller.abort(new Error("already gone"));
+    const started = Date.now();
+    await expect(bucket.acquire(controller.signal)).rejects.toThrow("already gone");
+    expect(Date.now() - started).toBeLessThan(50);
+  });
+
   it("waits for a whole token again when penalized while another caller is waiting", async () => {
     const bucket = new TokenBucket(1, 40);
     await bucket.acquire();

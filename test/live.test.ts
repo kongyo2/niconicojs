@@ -16,6 +16,14 @@ const live = LIVE_ENABLED ? describe : describe.skip;
 const authed = LIVE_ENABLED && LIVE_SESSION !== undefined ? describe : describe.skip;
 const writes = LIVE_ENABLED && LIVE_SESSION !== undefined && LIVE_WRITES ? describe : describe.skip;
 
+async function eventually(check: () => Promise<boolean>): Promise<boolean> {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    if (await check()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  return false;
+}
+
 async function firstMediaPlaylist(masterUrl: string, headers: Record<string, string>): Promise<string> {
   const master = await (await fetch(masterUrl, { headers })).text();
   const media = master.split("\n").find((line) => line.length > 0 && !line.startsWith("#"));
@@ -342,7 +350,12 @@ writes("live: reversible writes (NICONICO_LIVE_WRITES=1)", () => {
       });
       await session.mylists.addMylistItem(id, VIDEO_ID, { description: "memo" });
       await session.mylists.addMylistItem(id, TAGGED_VIDEO_ID);
-      const filled = await session.mylists.getMyMylist(id);
+      let filled = await session.mylists.getMyMylist(id);
+      const bothListed = await eventually(async () => {
+        filled = await session.mylists.getMyMylist(id);
+        return filled.items.length === 2;
+      });
+      expect(bothListed).toBe(true);
       expect(filled.name).toBe(`${name}-renamed`);
       expect(filled.defaultSortOrder).toBe("asc");
       expect(filled.items.map((item) => item.watchId).sort()).toEqual([TAGGED_VIDEO_ID, VIDEO_ID].sort());
@@ -351,24 +364,35 @@ writes("live: reversible writes (NICONICO_LIVE_WRITES=1)", () => {
         id,
         filled.items.map((item) => item.itemId),
       );
-      expect((await session.mylists.getMyMylist(id)).items).toEqual([]);
+      expect(await eventually(async () => (await session.mylists.getMyMylist(id)).items.length === 0)).toBe(true);
     } finally {
       await session.mylists.deleteMylist(id);
     }
-    const compact = await session.mylists.getMyMylistsCompact();
-    expect(compact.some((mylist) => mylist.id === id)).toBe(false);
+    const gone = await eventually(async () =>
+      (await session.mylists.getMyMylistsCompact()).every((mylist) => mylist.id !== id),
+    );
+    expect(gone).toBe(true);
   });
 
   it("adds to watch-later with a memo and removes the entry by watch id", async () => {
     const item = await session.mylists.addWatchLater(TAGGED_VIDEO_ID, { memo: "niconicojs" });
+    let removedByWatchId = false;
     try {
       expect(item?.watchId).toBe(TAGGED_VIDEO_ID);
       expect(item?.memo).toBe("niconicojs");
-    } finally {
       await session.mylists.removeWatchLater([TAGGED_VIDEO_ID]);
+      removedByWatchId = true;
+    } finally {
+      if (!removedByWatchId && item?.itemId !== undefined) {
+        await session.mylists.removeWatchLater([item.itemId]);
+      }
     }
-    const after = await session.mylists.getMyWatchLater({ pageSize: 100 });
-    expect(after.items.some((entry) => entry.watchId === TAGGED_VIDEO_ID)).toBe(false);
+    const gone = await eventually(async () =>
+      (await session.mylists.getMyWatchLater({ pageSize: 100 })).items.every(
+        (entry) => entry.watchId !== TAGGED_VIDEO_ID,
+      ),
+    );
+    expect(gone).toBe(true);
   });
 
   it("adds and removes a server-side NG word", async () => {
@@ -399,17 +423,23 @@ writes("live: reversible writes (NICONICO_LIVE_WRITES=1)", () => {
     if (!complete || seen.has(target)) ctx.skip();
 
     const watch = await session.watch.getWatchV4(target);
-    await session.watch.recordView(watch);
     let recorded = false;
-    for (let attempt = 0; attempt < 10 && !recorded; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-      const latest = await session.history.getMyWatchHistory({ limit: 10 });
-      recorded = latest.items.some((entry) => entry.video.id === target);
+    let removed: string[] = [];
+    try {
+      await session.watch.recordView(watch);
+      for (let attempt = 0; attempt < 10 && !recorded; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        const latest = await session.history.getMyWatchHistory({ limit: 10 });
+        recorded = latest.items.some((entry) => entry.video.id === target);
+      }
+    } finally {
+      removed = await session.history.removeMyWatchHistory(target);
     }
-    const removed = await session.history.removeMyWatchHistory(target);
     expect(recorded).toBe(true);
     expect(removed.some((itemId) => itemId.endsWith(`#${target}`))).toBe(true);
-    const latest = await session.history.getMyWatchHistory({ limit: 10 });
-    expect(latest.items.some((entry) => entry.video.id === target)).toBe(false);
+    const gone = await eventually(async () =>
+      (await session.history.getMyWatchHistory({ limit: 10 })).items.every((entry) => entry.video.id !== target),
+    );
+    expect(gone).toBe(true);
   });
 });

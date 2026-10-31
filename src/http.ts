@@ -115,6 +115,22 @@ export function abortableSleep(ms: number, maybeSignal: AbortSignal | undefined)
   });
 }
 
+function rejectOnAbort(promise: Promise<void>, signal: AbortSignal): Promise<void> {
+  let stopListening = (): void => undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    const onAbort = (): void => {
+      reject(abortReason(signal));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    stopListening = () => {
+      signal.removeEventListener("abort", onAbort);
+    };
+  });
+  return Promise.race([promise, aborted]).finally(() => {
+    stopListening();
+  });
+}
+
 export class RateLimiter {
   private lastAt = 0;
   private lock: Promise<void> = Promise.resolve();
@@ -155,9 +171,10 @@ export class TokenBucket implements RequestThrottle {
   }
 
   acquire(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted === true) return Promise.reject(abortReason(signal));
     const turn = this.lock.then(() => this.take(signal));
     this.lock = turn.catch(() => undefined);
-    return turn;
+    return signal === undefined ? turn : rejectOnAbort(turn, signal);
   }
 
   penalize(): void {
