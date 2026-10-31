@@ -7,6 +7,7 @@ import { createHistoryApi, type HistoryApi } from "./history.js";
 import { extractUserSession, NiconicoHttp, type NiconicoHttpOptions } from "./http.js";
 import { createLikesApi, type LikesApi } from "./likes.js";
 import { createMylistsApi, type MylistsApi } from "./mylists.js";
+import { createNgCommentsApi, type NgCommentsApi } from "./ng-comments.js";
 import { createRankingApi, type RankingApi } from "./ranking.js";
 import { createSearchApi, type SearchApi } from "./search.js";
 import { createSeriesApi, type SeriesApi } from "./series.js";
@@ -44,6 +45,7 @@ export class NiconicoClient {
   readonly feed: FeedApi;
   readonly history: HistoryApi;
   readonly likes: LikesApi;
+  readonly ngComments: NgCommentsApi;
 
   constructor(options: NiconicoClientOptions = {}) {
     const { session, ...httpOptions } = options;
@@ -66,11 +68,9 @@ export class NiconicoClient {
     this.feed = createFeedApi(this.http);
     this.history = createHistoryApi(this.http);
     this.likes = createLikesApi(this.http);
+    this.ngComments = createNgCommentsApi(this.http);
     this.comments = createCommentsApi(this.http, async (videoId, commentOptions) => {
-      const watch = await this.watch.getBestWatchData(videoId, {
-        noSideEffect: true,
-        ...commentOptions,
-      });
+      const watch = await this.watch.getWatchV4(videoId, commentOptions);
       const nvComment = watch.data.comment.nvComment;
       if (nvComment === null) {
         throw new NiconicoError(`watch data for ${videoId} carried no nvComment credentials`);

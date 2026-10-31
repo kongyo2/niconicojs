@@ -1,10 +1,12 @@
 import { NiconicoClient } from "../src/client.js";
 import { domandRequestHeaders } from "../src/streaming.js";
 import { RANKING_ALL_KEY } from "../src/ranking.js";
+import { NiconicoApiError } from "../src/errors.js";
 
 const SESSION = process.env["NICONICO_SESSION"];
 const VIDEO_ID = "sm9";
 const TAGGED_VIDEO_ID = "sm500873";
+const SERIES_VIDEO_ID = "sm41131114";
 const USER_ID = 4;
 const PUBLIC_MYLIST_ID = 65776587;
 const PUBLIC_SERIES_ID = 363443;
@@ -208,6 +210,52 @@ async function main(): Promise<void> {
     return `HTTP ${response.status}, ${playlist.split("\n").length} lines`;
   });
 
+  const v4 = await guest.watch.getWatchV4(VIDEO_ID).catch(() => null);
+  await check("watch.getWatchV4 (guest)", async () => {
+    if (v4 === null) throw new Error("v4 watch failed");
+    const media = v4.data.media;
+    return `${v4.data.video.title} hls=${String(media?.hls != null)} bid=${String(v4.domandBidCookie !== undefined)}`;
+  });
+
+  await check("streaming.getPreissuedHls + AES key", async () => {
+    if (v4 === null) throw new Error("v4 watch failed");
+    const hls = guest.streaming.getPreissuedHls(v4);
+    if (hls === undefined) throw new Error("no pre-issued HLS");
+    const headers = domandRequestHeaders(hls);
+    const master = await (await fetch(hls.contentUrl, { headers })).text();
+    const mediaPath = master.split("\n").find((line) => line.length > 0 && !line.startsWith("#"));
+    if (mediaPath === undefined) throw new Error("master listed no media playlist");
+    const mediaUrl = new URL(mediaPath, hls.contentUrl).toString();
+    const media = await (await fetch(mediaUrl, { headers })).text();
+    const keyPath = /#EXT-X-KEY:[^\n]*URI="([^"]+)"/.exec(media)?.[1];
+    if (keyPath === undefined) throw new Error("media playlist carried no key");
+    const key = await fetch(new URL(keyPath, mediaUrl).toString(), { headers });
+    const bytes = (await key.arrayBuffer()).byteLength;
+    if (key.status !== 200 || bytes !== 16) throw new Error(`key fetch HTTP ${key.status} (${bytes} bytes)`);
+    return `master ok, key HTTP ${key.status} ${bytes}B`;
+  });
+
+  await check("watch.getWatchLazy (series)", async () => {
+    const seriesWatch = await guest.watch.getWatchV4(SERIES_VIDEO_ID);
+    const lazy = await guest.watch.getWatchLazy(seriesWatch);
+    if (lazy.series === null) throw new Error("lazy data carried no series");
+    return `series #${lazy.series.id} ${lazy.series.title}, owner=${lazy.owner?.type ?? "-"}`;
+  });
+
+  await check("watch.getWatchV4 reasonCode (deleted sm1)", async () => {
+    const error = await guest.watch.getWatchV4("sm1").catch((e: unknown) => e);
+    if (!(error instanceof NiconicoApiError)) throw new Error("sm1 unexpectedly returned watch data");
+    return `${error.status} ${error.errorCode ?? "-"} reasonCode=${error.reasonCode ?? "-"}`;
+  });
+
+  await check("search.searchVideos (multi-genre, short)", async () => {
+    const both = await guest.search.searchVideos({ keyword: "初音ミク", genres: ["game", "music_sound"], pageSize: 1 });
+    const music = await guest.search.searchVideos({ keyword: "初音ミク", genres: ["music_sound"], pageSize: 1 });
+    if (both.totalCount <= music.totalCount) throw new Error("the second genre was ignored");
+    const shorts = await guest.search.searchVideos({ keyword: "初音ミク", selectContentType: "short", pageSize: 1 });
+    return `game+music=${both.totalCount} music=${music.totalCount} short first=${shorts.items[0]?.id ?? "-"}`;
+  });
+
   if (SESSION === undefined) {
     for (const name of [
       "watch.getWatchData (v3)",
@@ -219,6 +267,12 @@ async function main(): Promise<void> {
       "likes.getMyLikes",
       "feed.getActors",
       "feed.getFollowingsVideo",
+      "watch.getWatchV4 (session)",
+      "streaming guest data on a session client",
+      "comments.fetchAllCommentsByVideoId",
+      "ngComments.getMyNgComments",
+      "mylists.getMyMylistsCompact",
+      "feed.hasUnread",
     ]) {
       skip(name, "NICONICO_SESSION not set");
     }
@@ -270,6 +324,39 @@ async function main(): Promise<void> {
     await check("feed.getFollowingsVideo", async () => {
       const result = await client.feed.getFollowingsVideo({ limit: 5 });
       return `${result.activities.length} activities`;
+    });
+
+    await check("watch.getWatchV4 (session)", async () => {
+      const own = await client.watch.getWatchV4(VIDEO_ID);
+      const storyboard = await client.streaming.getStoryboardFromWatch(own);
+      return `viewer=${own.data.viewer?.nickname ?? "-"} storyboard=${storyboard.contentUrl.slice(0, 40)}`;
+    });
+
+    await check("streaming guest data on a session client", async () => {
+      const guestData = await client.watch.getGuestWatchData(VIDEO_ID, { noSideEffect: true });
+      const hls = await client.streaming.getHlsFromWatch(guestData);
+      const response = await fetch(hls.contentUrl, { headers: domandRequestHeaders(hls) });
+      if (response.status !== 200) throw new Error(`master HTTP ${response.status}`);
+      return `HTTP ${response.status}`;
+    });
+
+    await check("comments.fetchAllCommentsByVideoId", async () => {
+      const all = await client.comments.fetchAllCommentsByVideoId(VIDEO_ID, { maxTotalCount: 1200 });
+      return `${all.length} comments`;
+    });
+
+    await check("ngComments.getMyNgComments", async () => {
+      const ng = await client.ngComments.getMyNgComments();
+      return `revision=${ng.revision} count=${ng.count}`;
+    });
+
+    await check("mylists.getMyMylistsCompact", async () => {
+      const compact = await client.mylists.getMyMylistsCompact();
+      return `${compact.length} mylists`;
+    });
+
+    await check("feed.hasUnread", async () => {
+      return `isUnread=${String(await client.feed.hasUnread())}`;
     });
   }
 

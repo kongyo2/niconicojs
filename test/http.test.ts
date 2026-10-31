@@ -1,15 +1,19 @@
 import { describe, expect, it } from "vitest";
 import {
   buildQuery,
+  COMMENT_BURST_LIMIT,
+  COMMENT_REFILL_PER_SECOND,
+  commentThrottle,
   extractUserSession,
   NiconicoHttp,
   RateLimiter,
   readCookieValue,
   pickRequestOptions,
   isNiconicoHost,
+  TokenBucket,
   type FetchLike,
 } from "../src/http.js";
-import { NiconicoApiError, NiconicoNetworkError, NiconicoTimeoutError } from "../src/errors.js";
+import { NiconicoApiError, NiconicoError, NiconicoNetworkError, NiconicoTimeoutError } from "../src/errors.js";
 import { mockFetch, nvapi, testHttp } from "./helpers.js";
 
 describe("buildQuery", () => {
@@ -241,6 +245,138 @@ describe("RateLimiter", () => {
     await limiter.acquire(30);
     await limiter.acquire(30);
     expect(Date.now() - started).toBeGreaterThanOrEqual(55);
+  });
+});
+
+describe("TokenBucket", () => {
+  it("lets a burst through immediately, then paces at the refill rate", async () => {
+    const bucket = new TokenBucket(3, 20);
+    const started = Date.now();
+    await Promise.all([bucket.acquire(), bucket.acquire(), bucket.acquire()]);
+    expect(Date.now() - started).toBeLessThan(40);
+    await bucket.acquire();
+    await bucket.acquire();
+    expect(Date.now() - started).toBeGreaterThanOrEqual(80);
+  });
+
+  it("empties on penalize so a burst does not follow a 429", async () => {
+    const bucket = new TokenBucket(5, 50);
+    bucket.penalize();
+    expect(bucket.available()).toBeLessThan(1);
+    const started = Date.now();
+    await bucket.acquire();
+    expect(Date.now() - started).toBeGreaterThanOrEqual(15);
+  });
+
+  it("rejects a waiting acquisition when its signal aborts, without jamming the queue", async () => {
+    const bucket = new TokenBucket(1, 0.01);
+    await bucket.acquire();
+    const controller = new AbortController();
+    const waiting = bucket.acquire(controller.signal);
+    controller.abort();
+    await expect(waiting).rejects.toBeTruthy();
+    const quick = new TokenBucket(1, 1000);
+    await expect(quick.acquire()).resolves.toBeUndefined();
+  });
+
+  it("waits for a whole token again when penalized while another caller is waiting", async () => {
+    const bucket = new TokenBucket(1, 40);
+    await bucket.acquire();
+    const started = Date.now();
+    const waiting = bucket.acquire();
+    setTimeout(() => bucket.penalize(), 15);
+    await waiting;
+    expect(Date.now() - started).toBeGreaterThanOrEqual(35);
+  });
+
+  it("rejects settings that could never hand out a token", () => {
+    expect(() => new TokenBucket(0, 1)).toThrow(NiconicoError);
+    expect(() => new TokenBucket(5, 0)).toThrow(NiconicoError);
+    expect(() => new TokenBucket(5, Number.POSITIVE_INFINITY)).toThrow(NiconicoError);
+  });
+
+  it("ships comment defaults that stay under NNDD-RE's ~100-request burst in any three minutes", () => {
+    expect(COMMENT_BURST_LIMIT + COMMENT_REFILL_PER_SECOND * 180).toBeLessThan(100);
+    expect(commentThrottle.capacity).toBe(COMMENT_BURST_LIMIT);
+    expect(commentThrottle.refillPerSecond).toBe(COMMENT_REFILL_PER_SECOND);
+    expect(new NiconicoHttp().commentThrottle).toBe(commentThrottle);
+  });
+});
+
+describe("throttle and anonymous request options", () => {
+  it("penalizes the request's throttle on a 429 and leaves the pacing to it rather than retrying", async () => {
+    let penalized = 0;
+    const throttle = {
+      acquire: () => Promise.resolve(),
+      penalize: () => {
+        penalized += 1;
+      },
+    };
+    const mock = mockFetch({ status: 429 });
+    const http = new NiconicoHttp({ fetch: mock.fetch, retryAttempts: 3, retryBaseDelayMs: 1 });
+    await expect(http.getJson("https://public.nvcomment.nicovideo.jp/v1/x", { throttle })).rejects.toBeInstanceOf(
+      NiconicoApiError,
+    );
+    expect(penalized).toBe(1);
+    expect(mock.calls).toHaveLength(1);
+  });
+
+  it("still retries a 429 for unthrottled requests", async () => {
+    const mock = mockFetch([{ status: 429 }, { json: nvapi({}) }]);
+    const http = new NiconicoHttp({ fetch: mock.fetch, retryAttempts: 2, retryBaseDelayMs: 1 });
+    await expect(http.getJson("https://nvapi.nicovideo.jp/v1/x")).resolves.toEqual(nvapi({}));
+    expect(mock.calls).toHaveLength(2);
+  });
+
+  it("omits the session cookie from an anonymous request", async () => {
+    const mock = mockFetch({ json: nvapi({}) });
+    await testHttp(mock, { session: "secret" }).getJson("https://nvapi.nicovideo.jp/v1/x", { anonymous: true });
+    expect(mock.only().headers["Cookie"]).toBeUndefined();
+  });
+
+  it("forwards throttle and anonymous through pickRequestOptions", () => {
+    const throttle = { acquire: () => Promise.resolve(), penalize: () => undefined };
+    expect(pickRequestOptions({ throttle, anonymous: true })).toEqual({ throttle, anonymous: true });
+  });
+
+  it("sends a form body with the matching content type", async () => {
+    const mock = mockFetch({ json: nvapi({}) });
+    await testHttp(mock).sendForm("https://nvapi.nicovideo.jp/v1/x", "POST", { name: "初音", isPublic: false });
+    const call = mock.only();
+    expect(call.headers["Content-Type"]).toBe("application/x-www-form-urlencoded");
+    expect(call.body).toBe("name=%E5%88%9D%E9%9F%B3&isPublic=false");
+  });
+});
+
+describe("error classification", () => {
+  it("keeps the maintenance errorCode once a 503 has exhausted its retries", async () => {
+    const mock = mockFetch({ status: 503, json: { meta: { status: 503, errorCode: "MAINTENANCE" } } });
+    const http = new NiconicoHttp({ fetch: mock.fetch, retryAttempts: 2, retryBaseDelayMs: 1 });
+    const error = (await http.getJson("https://nvapi.nicovideo.jp/v1/x").catch((e: unknown) => e)) as NiconicoApiError;
+    expect(mock.calls).toHaveLength(2);
+    expect(error.status).toBe(503);
+    expect(error.errorCode).toBe("MAINTENANCE");
+    expect(error.isMaintenance()).toBe(true);
+  });
+
+  it("names a rate limit", async () => {
+    const mock = mockFetch({ status: 429, json: { meta: { status: 429, errorCode: "TOO_MANY_REQUESTS" } } });
+    const error = (await testHttp(mock)
+      .getJson("https://nvapi.nicovideo.jp/v1/x")
+      .catch((e: unknown) => e)) as NiconicoApiError;
+    expect(error.isRateLimited()).toBe(true);
+    expect(error.errorCode).toBe("TOO_MANY_REQUESTS");
+  });
+
+  it("reads data.reasonCode from a refusal", async () => {
+    const mock = mockFetch({
+      status: 400,
+      json: { meta: { status: 400, errorCode: "FORBIDDEN" }, data: { reasonCode: "ADMINISTRATOR_DELETE_VIDEO" } },
+    });
+    const error = (await testHttp(mock)
+      .getJson("https://www.nicovideo.jp/api/watch/v3_guest/sm1")
+      .catch((e: unknown) => e)) as NiconicoApiError;
+    expect(error.reasonCode).toBe("ADMINISTRATOR_DELETE_VIDEO");
   });
 });
 

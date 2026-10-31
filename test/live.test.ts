@@ -3,14 +3,28 @@ import { NiconicoClient } from "../src/client.js";
 import { domandRequestHeaders, DomandUnavailableError } from "../src/streaming.js";
 import { ThreadKeyRejectedError } from "../src/comments.js";
 import { RANKING_ALL_KEY } from "../src/ranking.js";
-import { LIVE_ENABLED, LIVE_SESSION } from "./helpers.js";
+import { NiconicoApiError } from "../src/errors.js";
+import { LIVE_ENABLED, LIVE_SESSION, LIVE_WRITES } from "./helpers.js";
 
 const VIDEO_ID = "sm9";
 const TAGGED_VIDEO_ID = "sm500873";
+const SERIES_VIDEO_ID = "sm41131114";
+const SERIES_ID = 363443;
 const USER_ID = 4;
 
 const live = LIVE_ENABLED ? describe : describe.skip;
 const authed = LIVE_ENABLED && LIVE_SESSION !== undefined ? describe : describe.skip;
+const writes = LIVE_ENABLED && LIVE_SESSION !== undefined && LIVE_WRITES ? describe : describe.skip;
+
+async function firstMediaPlaylist(masterUrl: string, headers: Record<string, string>): Promise<string> {
+  const master = await (await fetch(masterUrl, { headers })).text();
+  const media = master.split("\n").find((line) => line.length > 0 && !line.startsWith("#"));
+  if (media === undefined) throw new Error("master playlist listed no media playlist");
+  const mediaUrl = new URL(media, masterUrl).toString();
+  return (await (await fetch(mediaUrl, { headers })).text()).replace(/URI="([^"]+)"/g, (_whole, uri: string) => {
+    return `URI="${new URL(uri, mediaUrl).toString()}"`;
+  });
+}
 
 const guest = new NiconicoClient();
 const session = new NiconicoClient(LIVE_SESSION === undefined ? {} : { session: LIVE_SESSION });
@@ -206,5 +220,196 @@ authed("live: authenticated reads", () => {
   it("reads the follow feed", async () => {
     await expect(session.feed.getActors({ limit: 10 })).resolves.toBeInstanceOf(Array);
     await expect(session.feed.getFollowingsVideo({ limit: 5 })).resolves.toHaveProperty("activities");
+  });
+});
+
+live("live: v4 watch, lazy data and pre-issued HLS", () => {
+  it("fetches v4 watch data as a guest, with an HLS session already issued", async () => {
+    const watch = await guest.watch.getWatchV4(VIDEO_ID);
+    expect(watch.guest).toBe(true);
+    expect(watch.data.video.id).toBe(VIDEO_ID);
+    expect(watch.data.client.watchTrackId).toBe(watch.actionTrackId);
+    expect(watch.data.viewer).toBeNull();
+    expect(watch.data.tags.items.length).toBeGreaterThan(0);
+    expect(watch.data.comment.nvComment).not.toBeNull();
+    expect(watch.data.media?.hls?.url).toContain(".m3u8");
+    expect(watch.domandBidCookie).toBeDefined();
+  });
+
+  it("plays the pre-issued HLS, whose AES key needs the watch call's domand_bid", async () => {
+    const watch = await guest.watch.getWatchV4(VIDEO_ID);
+    const hls = guest.streaming.getPreissuedHls(watch);
+    if (hls === undefined) throw new Error("no pre-issued HLS");
+    const media = await firstMediaPlaylist(hls.contentUrl, domandRequestHeaders(hls));
+    const keyUri = /#EXT-X-KEY:[^\n]*URI="([^"]+)"/.exec(media)?.[1];
+    if (keyUri === undefined) throw new Error("media playlist carried no key");
+    const withBid = await fetch(keyUri, { headers: domandRequestHeaders(hls) });
+    expect(withBid.status).toBe(200);
+    expect((await withBid.arrayBuffer()).byteLength).toBe(16);
+    const withoutBid = await fetch(keyUri, { headers: domandRequestHeaders({ domandBidCookie: undefined }) });
+    expect(withoutBid.status).toBe(403);
+  });
+
+  it("issues a fresh HLS session from v4 data", async () => {
+    const watch = await guest.watch.getWatchV4(VIDEO_ID);
+    const hls = await guest.streaming.getHlsFromWatch(watch);
+    const response = await fetch(hls.contentUrl, { headers: domandRequestHeaders(hls) });
+    expect(response.status).toBe(200);
+    expect((await response.text()).startsWith("#EXTM3U")).toBe(true);
+  });
+
+  it("reads the series from lazy data, since watch v3 no longer carries it", async () => {
+    const v3 = await guest.watch.getGuestWatchData(SERIES_VIDEO_ID, { noSideEffect: true });
+    expect(v3.data.series).toBeNull();
+    const watch = await guest.watch.getWatchV4(SERIES_VIDEO_ID);
+    const lazy = await guest.watch.getWatchLazy(watch);
+    expect(lazy.series?.id).toBe(SERIES_ID);
+    expect(lazy.owner?.type).toBe("user");
+  });
+
+  it("reports why a deleted video cannot be watched", async () => {
+    const error = await guest.watch.getWatchV4("sm1").catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(NiconicoApiError);
+    expect((error as NiconicoApiError).reasonCode).toBe("ADMINISTRATOR_DELETE_VIDEO");
+  });
+});
+
+live("live: search parameters", () => {
+  it("applies every genre of a multi-genre search", async () => {
+    const both = await guest.search.searchVideos({ keyword: "初音ミク", genres: ["game", "music_sound"], pageSize: 1 });
+    const music = await guest.search.searchVideos({ keyword: "初音ミク", genres: ["music_sound"], pageSize: 1 });
+    expect(both.totalCount).toBeGreaterThan(music.totalCount);
+  });
+
+  it("searches short videos on request", async () => {
+    const result = await guest.search.searchVideos({ keyword: "初音ミク", selectContentType: "short", pageSize: 3 });
+    expect(result.items.length).toBeGreaterThan(0);
+    expect(result.items.every((video) => video.contentType === "short")).toBe(true);
+  });
+});
+
+authed("live: authenticated v4 and account reads", () => {
+  it("fills the viewer and the storyboard flag in v4 data", async () => {
+    const watch = await session.watch.getWatchV4(VIDEO_ID);
+    expect(watch.guest).toBe(false);
+    expect(watch.data.viewer?.id).toBeGreaterThan(0);
+    expect(watch.data.media?.isStoryboardAvailable).toBe(true);
+    const storyboard = await session.streaming.getStoryboardFromWatch(watch);
+    expect(storyboard.contentUrl).toContain("storyboard");
+  });
+
+  it("reads the viewer's follow state from lazy data", async () => {
+    const watch = await session.watch.getWatchV4(VIDEO_ID);
+    const lazy = await session.watch.getWatchLazy(watch);
+    expect(lazy.owner?.follow).not.toBeNull();
+  });
+
+  it("streams guest watch data on a logged-in client", async () => {
+    const v3 = await session.watch.getGuestWatchData(VIDEO_ID, { noSideEffect: true });
+    const fromV3 = await session.streaming.getHlsFromWatch(v3);
+    expect((await fetch(fromV3.contentUrl, { headers: domandRequestHeaders(fromV3) })).status).toBe(200);
+    const v4 = await session.watch.getWatchV4(VIDEO_ID, { asGuest: true });
+    const fromV4 = await session.streaming.getHlsFromWatch(v4);
+    expect((await fetch(fromV4.contentUrl, { headers: domandRequestHeaders(fromV4) })).status).toBe(200);
+  });
+
+  it("walks comment history by video id with v4-resolved keys", async () => {
+    const all = await session.comments.fetchAllCommentsByVideoId(VIDEO_ID, { maxTotalCount: 1200 });
+    expect(all.length).toBeGreaterThan(600);
+    expect(new Set(all.map((comment) => comment.no)).size).toBe(all.length);
+  });
+
+  it("reads the account's NG list, compact mylist index and unread flag", async () => {
+    const ng = await session.ngComments.getMyNgComments();
+    expect(ng.count).toBe(ng.items.length);
+    await expect(session.mylists.getMyMylistsCompact()).resolves.toBeInstanceOf(Array);
+    await expect(session.feed.hasUnread()).resolves.toBeTypeOf("boolean");
+  });
+});
+
+writes("live: reversible writes (NICONICO_LIVE_WRITES=1)", () => {
+  it("creates, edits, fills, empties and deletes a private mylist", async () => {
+    const name = `niconicojs-live-${Date.now().toString(36)}`;
+    const id = await session.mylists.createMylist({ name, description: "d", isPublic: false });
+    try {
+      await session.mylists.updateMylist({
+        mylistId: id,
+        name: `${name}-renamed`,
+        description: "d2",
+        isPublic: false,
+        defaultSortKey: "addedAt",
+        defaultSortOrder: "asc",
+      });
+      await session.mylists.addMylistItem(id, VIDEO_ID, { description: "memo" });
+      await session.mylists.addMylistItem(id, TAGGED_VIDEO_ID);
+      const filled = await session.mylists.getMyMylist(id);
+      expect(filled.name).toBe(`${name}-renamed`);
+      expect(filled.defaultSortOrder).toBe("asc");
+      expect(filled.items.map((item) => item.watchId).sort()).toEqual([TAGGED_VIDEO_ID, VIDEO_ID].sort());
+      await expect(session.mylists.getMylist(id)).rejects.toMatchObject({ status: 403 });
+      await session.mylists.removeMylistItems(
+        id,
+        filled.items.map((item) => item.itemId),
+      );
+      expect((await session.mylists.getMyMylist(id)).items).toEqual([]);
+    } finally {
+      await session.mylists.deleteMylist(id);
+    }
+    const compact = await session.mylists.getMyMylistsCompact();
+    expect(compact.some((mylist) => mylist.id === id)).toBe(false);
+  });
+
+  it("adds to watch-later with a memo and removes the entry by watch id", async () => {
+    const item = await session.mylists.addWatchLater(TAGGED_VIDEO_ID, { memo: "niconicojs" });
+    try {
+      expect(item?.watchId).toBe(TAGGED_VIDEO_ID);
+      expect(item?.memo).toBe("niconicojs");
+    } finally {
+      await session.mylists.removeWatchLater([TAGGED_VIDEO_ID]);
+    }
+    const after = await session.mylists.getMyWatchLater({ pageSize: 100 });
+    expect(after.items.some((entry) => entry.watchId === TAGGED_VIDEO_ID)).toBe(false);
+  });
+
+  it("adds and removes a server-side NG word", async () => {
+    const source = `niconicojs-live-${Date.now().toString(36)}`;
+    const added = await session.ngComments.addNgComment({ type: "word", source });
+    try {
+      expect(added.items.some((item) => item.source === source)).toBe(true);
+    } finally {
+      const removed = await session.ngComments.removeNgComments([{ type: "word", source }]);
+      expect(removed.items.some((item) => item.source === source)).toBe(false);
+    }
+  });
+
+  it("records a view and removes it again, for a video the history does not hold yet", async (ctx) => {
+    const target = TAGGED_VIDEO_ID;
+    const seen = new Set<string>();
+    let complete = false;
+    let cursor: string | undefined;
+    for (let page = 0; page < 20; page += 1) {
+      const result = await session.history.getMyWatchHistory({ limit: 100, cursor });
+      for (const entry of result.items) seen.add(entry.video.id);
+      if (result.items.length === 0 || result.nextCursor === undefined) {
+        complete = true;
+        break;
+      }
+      cursor = result.nextCursor;
+    }
+    if (!complete || seen.has(target)) ctx.skip();
+
+    const watch = await session.watch.getWatchV4(target);
+    await session.watch.recordView(watch);
+    let recorded = false;
+    for (let attempt = 0; attempt < 10 && !recorded; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      const latest = await session.history.getMyWatchHistory({ limit: 10 });
+      recorded = latest.items.some((entry) => entry.video.id === target);
+    }
+    const removed = await session.history.removeMyWatchHistory(target);
+    expect(recorded).toBe(true);
+    expect(removed.some((itemId) => itemId.endsWith(`#${target}`))).toBe(true);
+    const latest = await session.history.getMyWatchHistory({ limit: 10 });
+    expect(latest.items.some((entry) => entry.video.id === target)).toBe(false);
   });
 });

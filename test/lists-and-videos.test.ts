@@ -7,7 +7,7 @@ import { createHistoryApi } from "../src/history.js";
 import { createFeedApi, FEED_MAX_LIMIT } from "../src/feed.js";
 import { createAccountPublicApi } from "../src/account-public.js";
 import { NiconicoApiError, NiconicoError } from "../src/errors.js";
-import { mockFetch, nvapi, testHttp } from "./helpers.js";
+import { formOf, mockFetch, nvapi, testHttp } from "./helpers.js";
 
 const video = (id: string) => ({ id, title: id, count: {}, thumbnail: {}, owner: null });
 
@@ -56,21 +56,76 @@ describe("MylistsApi reads", () => {
   });
 });
 
+describe("MylistsApi own-list reads", () => {
+  it("reads one of the session user's mylists through the route that also serves private ones", async () => {
+    const mock = mockFetch({ json: nvapi({ mylist: { id: 5, name: "private", description: "", isPublic: false } }) });
+    const result = await createMylistsApi(testHttp(mock)).getMyMylist(5, { pageSize: 3 });
+    expect(mock.only().url).toBe("https://nvapi.nicovideo.jp/v1/users/me/mylists/5?pageSize=3");
+    expect(result.isPublic).toBe(false);
+    expect(result.items).toEqual([]);
+  });
+
+  it("pages the session user's mylist items", async () => {
+    const page = (ids: string[], hasNext: boolean) =>
+      nvapi({
+        mylist: {
+          id: 5,
+          name: "m",
+          description: "",
+          hasNext,
+          items: ids.map((id) => ({ itemId: Number(id.slice(2)), watchId: id, video: video(id) })),
+        },
+      });
+    const mock = mockFetch([{ json: page(["sm1"], true) }, { json: page(["sm2"], false) }]);
+    const ids: string[] = [];
+    for await (const item of createMylistsApi(testHttp(mock)).iterateMyMylistItems(5, { pageSize: 1 })) {
+      ids.push(item.watchId);
+    }
+    expect(ids).toEqual(["sm1", "sm2"]);
+    expect(mock.calls[1]?.url).toContain("/v1/users/me/mylists/5?pageSize=1&page=2");
+  });
+
+  it("lists the compact own-mylist index", async () => {
+    const mock = mockFetch({ json: nvapi({ mylists: [{ id: 1, isPublic: false, name: "a", description: "" }] }) });
+    const result = await createMylistsApi(testHttp(mock)).getMyMylistsCompact();
+    expect(mock.only().url).toBe("https://nvapi.nicovideo.jp/v1/users/me/mylists/compact");
+    expect(result.map((m) => m.name)).toEqual(["a"]);
+  });
+
+  it("forwards paging and title filters on the own-mylist listing", async () => {
+    const mock = mockFetch({ json: nvapi({ mylists: [], totalCount: 0, hasNext: false }) });
+    await createMylistsApi(testHttp(mock)).getMyMylists({ page: 2, pageSize: 10, title: "BGM", sampleItemCount: 1 });
+    expect(mock.query().get("page")).toBe("2");
+    expect(mock.query().get("pageSize")).toBe("10");
+    expect(mock.query().get("title")).toBe("BGM");
+    expect(mock.query().get("sampleItemCount")).toBe("1");
+  });
+});
+
 describe("MylistsApi writes", () => {
-  it("creates a mylist through query parameters and returns the new id", async () => {
+  it("creates a mylist with a form body, like the web client, and returns the new id", async () => {
     const mock = mockFetch({ json: nvapi({ mylistId: 987 }) });
     const id = await createMylistsApi(testHttp(mock)).createMylist({ name: "test", isPublic: false });
 
     const call = mock.only();
     expect(call.method).toBe("POST");
+    expect(call.url).toBe("https://nvapi.nicovideo.jp/v1/users/me/mylists");
     expect(call.headers["X-Request-With"]).toBe("https://www.nicovideo.jp");
-    expect(mock.query().get("name")).toBe("test");
-    expect(mock.query().get("isPublic")).toBe("false");
-    expect(mock.query().get("defaultSortKey")).toBe("addedAt");
+    expect(call.headers["Content-Type"]).toBe("application/x-www-form-urlencoded");
+    const form = formOf(call);
+    expect(form.get("name")).toBe("test");
+    expect(form.get("isPublic")).toBe("false");
+    expect(form.get("defaultSortKey")).toBe("addedAt");
+    expect(form.get("defaultSortOrder")).toBe("desc");
     expect(id).toBe(987);
   });
 
-  it("adds and removes items on the right routes and methods", async () => {
+  it("refuses to report a made-up id when creation returns none", async () => {
+    const mock = mockFetch({ json: nvapi({}) });
+    await expect(createMylistsApi(testHttp(mock)).createMylist({ name: "x" })).rejects.toBeInstanceOf(NiconicoError);
+  });
+
+  it("adds an item through the query and removes several with one comma-joined itemIds", async () => {
     const add = mockFetch({ json: nvapi({}) });
     await createMylistsApi(testHttp(add)).addMylistItem(1, "sm9", { description: "note" });
     expect(add.only().method).toBe("POST");
@@ -81,18 +136,65 @@ describe("MylistsApi writes", () => {
     const remove = mockFetch({ json: nvapi({}) });
     await createMylistsApi(testHttp(remove)).removeMylistItems(1, [11, 22]);
     expect(remove.only().method).toBe("DELETE");
-    expect(remove.query().getAll("itemIds")).toEqual(["11", "22"]);
+    expect(remove.query().getAll("itemIds")).toEqual(["11,22"]);
   });
 
-  it("adds and removes watch-later entries", async () => {
-    const add = mockFetch({ json: nvapi({}) });
-    await createMylistsApi(testHttp(add)).addWatchLater("sm9");
-    expect(add.query().get("watchId")).toBe("sm9");
+  it("adds to watch-later with the web client's form body and returns the created item", async () => {
+    const add = mockFetch({
+      status: 201,
+      json: {
+        meta: { status: 201 },
+        data: { watchLater: { item: { itemId: 1173108780, watchId: "sm9", memo: "m" } } },
+      },
+    });
+    const item = await createMylistsApi(testHttp(add)).addWatchLater("sm9", { memo: "m" });
+    const call = add.only();
+    expect(call.url).toBe("https://nvapi.nicovideo.jp/v1/users/me/watch-later");
+    expect(formOf(call).get("watchId")).toBe("sm9");
+    expect(formOf(call).get("memo")).toBe("m");
+    expect(item?.itemId).toBe(1173108780);
+  });
 
+  it("removes watch-later entries by itemId, without a lookup when ids are numeric", async () => {
     const remove = mockFetch({ json: nvapi({}) });
-    await createMylistsApi(testHttp(remove)).removeWatchLater(["sm9", "sm2"]);
+    await createMylistsApi(testHttp(remove)).removeWatchLater([1173108780, "1182590816"]);
     expect(remove.only().method).toBe("DELETE");
-    expect(remove.query().getAll("watchIds")).toEqual(["sm9", "sm2"]);
+    expect(remove.query().get("itemIds")).toBe("1173108780,1182590816");
+    expect(remove.query().has("watchIds")).toBe(false);
+  });
+
+  it("resolves watch ids to itemIds through the watch-later listing", async () => {
+    const mock = mockFetch([
+      {
+        json: nvapi({
+          watchLater: {
+            items: [
+              { itemId: 1, watchId: "sm9", video: video("sm9") },
+              { itemId: 2, watchId: "sm2", video: video("sm2") },
+            ],
+            totalCount: 3,
+            hasNext: true,
+          },
+        }),
+      },
+      {
+        json: nvapi({
+          watchLater: { items: [{ itemId: 3, watchId: "sm3", video: video("sm3") }], totalCount: 3, hasNext: false },
+        }),
+      },
+      { json: nvapi({}) },
+    ]);
+    await createMylistsApi(testHttp(mock)).removeWatchLater(["sm3", "sm9"]);
+    expect(mock.calls.map((call) => call.method)).toEqual(["GET", "GET", "DELETE"]);
+    expect(mock.query(2).get("itemIds")?.split(",").sort()).toEqual(["1", "3"]);
+  });
+
+  it("deletes nothing when a watch id is not in watch-later", async () => {
+    const mock = mockFetch([
+      { json: nvapi({ watchLater: { items: [{ itemId: 1, watchId: "sm9", video: video("sm9") }], hasNext: false } }) },
+    ]);
+    await expect(createMylistsApi(testHttp(mock)).removeWatchLater(["sm9", "sm404"])).rejects.toThrow(/sm404/);
+    expect(mock.calls.every((call) => call.method === "GET")).toBe(true);
   });
 
   it("surfaces the abuse block as an identifiable error", async () => {
@@ -273,7 +375,7 @@ describe("regressions from review", () => {
     expect(later.calls).toHaveLength(0);
   });
 
-  it("sends every field on update, since the route replaces rather than patches", async () => {
+  it("sends every field on update, as a form body", async () => {
     const mock = mockFetch({ json: nvapi({}) });
     await createMylistsApi(testHttp(mock)).updateMylist({
       mylistId: 1,
@@ -283,9 +385,14 @@ describe("regressions from review", () => {
       defaultSortKey: "registeredAt",
       defaultSortOrder: "asc",
     });
-    const query = mock.query();
-    expect(query.get("isPublic")).toBe("true");
-    expect(query.get("description")).toBe("kept");
-    expect(query.get("defaultSortKey")).toBe("registeredAt");
+    const call = mock.only();
+    expect(call.method).toBe("PUT");
+    expect(call.url).toBe("https://nvapi.nicovideo.jp/v1/users/me/mylists/1");
+    const form = formOf(call);
+    expect(form.get("name")).toBe("renamed");
+    expect(form.get("isPublic")).toBe("true");
+    expect(form.get("description")).toBe("kept");
+    expect(form.get("defaultSortKey")).toBe("registeredAt");
+    expect(form.get("defaultSortOrder")).toBe("asc");
   });
 });

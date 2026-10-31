@@ -180,6 +180,8 @@ export interface SeriesItem {
 
 export type SensitiveContents = "mask" | "filter";
 
+export type VideoContentType = "long" | "short";
+
 export type SortOrder = "asc" | "desc";
 
 export type UserIdOrMe = number | "me";

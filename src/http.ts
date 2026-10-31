@@ -1,5 +1,6 @@
 import {
   NiconicoApiError,
+  NiconicoError,
   NiconicoNetworkError,
   NiconicoTimeoutError,
   assertNvapiMeta,
@@ -18,6 +19,11 @@ export interface RawResponse {
   text: string;
 }
 
+export interface RequestThrottle {
+  acquire(signal?: AbortSignal): Promise<void>;
+  penalize(): void;
+}
+
 export interface NiconicoHttpOptions {
   session?: string | undefined;
   frontendId?: FrontendId | undefined;
@@ -28,6 +34,7 @@ export interface NiconicoHttpOptions {
   retryBaseDelayMs?: number | undefined;
   headers?: Record<string, string> | undefined;
   fetch?: FetchLike | undefined;
+  commentThrottle?: RequestThrottle | undefined;
 }
 
 export interface RequestOptions {
@@ -36,6 +43,8 @@ export interface RequestOptions {
   validateMeta?: boolean | undefined;
   rateLimitMs?: number | undefined;
   idempotent?: boolean | undefined;
+  throttle?: RequestThrottle | undefined;
+  anonymous?: boolean | undefined;
 }
 
 const DEFAULT_USER_AGENT =
@@ -59,11 +68,13 @@ export function isNiconicoHost(url: string): boolean {
 class RetryableHttpError extends Error {
   readonly status: number;
   readonly retryAfterMs: number | undefined;
-  constructor(status: number, url: string, retryAfterMs: number | undefined) {
+  readonly envelope: ErrorEnvelope;
+  constructor(status: number, url: string, retryAfterMs: number | undefined, envelope: ErrorEnvelope) {
     super(`Transient HTTP ${status} on ${url}`);
     this.name = "RetryableHttpError";
     this.status = status;
     this.retryAfterMs = retryAfterMs;
+    this.envelope = envelope;
   }
 }
 
@@ -87,7 +98,7 @@ function abortReason(signal: AbortSignal): unknown {
   return signal.reason;
 }
 
-function abortableSleep(ms: number, maybeSignal: AbortSignal | undefined): Promise<void> {
+export function abortableSleep(ms: number, maybeSignal: AbortSignal | undefined): Promise<void> {
   if (maybeSignal === undefined) return sleep(ms);
   const signal = maybeSignal;
   if (signal.aborted) return Promise.reject(abortReason(signal));
@@ -125,8 +136,66 @@ export const commentRateLimiter: RateLimiter = new RateLimiter();
 
 export const COMMENT_RATE_LIMIT_MS = 334;
 
+export class TokenBucket implements RequestThrottle {
+  readonly capacity: number;
+  readonly refillPerSecond: number;
+  private tokens: number;
+  private refilledAt = Date.now();
+  private lock: Promise<void> = Promise.resolve();
+
+  constructor(capacity: number, refillPerSecond: number) {
+    if (!(capacity >= 1) || !(refillPerSecond > 0) || !Number.isFinite(refillPerSecond)) {
+      throw new NiconicoError(
+        `TokenBucket needs capacity >= 1 and a positive refill rate (got ${capacity}, ${refillPerSecond})`,
+      );
+    }
+    this.capacity = capacity;
+    this.refillPerSecond = refillPerSecond;
+    this.tokens = capacity;
+  }
+
+  acquire(signal?: AbortSignal): Promise<void> {
+    const turn = this.lock.then(() => this.take(signal));
+    this.lock = turn.catch(() => undefined);
+    return turn;
+  }
+
+  penalize(): void {
+    this.tokens = 0;
+    this.refilledAt = Date.now();
+  }
+
+  available(): number {
+    this.refill();
+    return this.tokens;
+  }
+
+  private refill(): void {
+    const now = Date.now();
+    this.tokens = Math.min(this.capacity, this.tokens + ((now - this.refilledAt) / 1000) * this.refillPerSecond);
+    this.refilledAt = now;
+  }
+
+  private async take(signal: AbortSignal | undefined): Promise<void> {
+    signal?.throwIfAborted();
+    this.refill();
+    while (this.tokens < 1) {
+      await abortableSleep(Math.ceil(((1 - this.tokens) / this.refillPerSecond) * 1000), signal);
+      this.refill();
+    }
+    this.tokens -= 1;
+  }
+}
+
+export const COMMENT_BURST_LIMIT = 40;
+
+export const COMMENT_REFILL_PER_SECOND = 0.25;
+
+export const commentThrottle: TokenBucket = new TokenBucket(COMMENT_BURST_LIMIT, COMMENT_REFILL_PER_SECOND);
+
 export class NiconicoHttp {
   readonly session: string | undefined;
+  readonly commentThrottle: RequestThrottle;
   private readonly frontendId: FrontendId;
   private readonly frontendVersion: string;
   private readonly userAgent: string;
@@ -146,13 +215,14 @@ export class NiconicoHttp {
     this.retryBaseDelayMs = options.retryBaseDelayMs ?? 500;
     this.extraHeaders = options.headers ?? {};
     this.fetchImpl = options.fetch ?? globalThis.fetch;
+    this.commentThrottle = options.commentThrottle ?? commentThrottle;
   }
 
   isLoggedIn(): boolean {
     return this.session !== undefined;
   }
 
-  baseHeaders(url: string): Record<string, string> {
+  baseHeaders(url: string, anonymous = false): Record<string, string> {
     const headers: Record<string, string> = {
       "User-Agent": this.userAgent,
       "X-Frontend-Id": String(this.frontendId),
@@ -161,7 +231,7 @@ export class NiconicoHttp {
       Referer: `${NICOVIDEO_ORIGIN}/`,
       ...this.extraHeaders,
     };
-    if (this.session !== undefined && isNiconicoHost(url)) {
+    if (!anonymous && this.session !== undefined && isNiconicoHost(url)) {
       headers["Cookie"] = `user_session=${this.session}`;
     }
     return headers;
@@ -173,10 +243,11 @@ export class NiconicoHttp {
     body: string | undefined,
     extraHeaders: Record<string, string> | undefined,
     signal: AbortSignal | undefined,
+    anonymous: boolean,
   ): Promise<RawResponse> {
     const timeout = AbortSignal.timeout(this.timeoutMs);
     const composed = signal === undefined ? timeout : AbortSignal.any([signal, timeout]);
-    const headers: Record<string, string> = { ...this.baseHeaders(url), ...extraHeaders };
+    const headers: Record<string, string> = { ...this.baseHeaders(url, anonymous), ...extraHeaders };
     const init: RequestInit = { method, headers, signal: composed, redirect: "follow" };
     if (body !== undefined) {
       init.body = body;
@@ -199,6 +270,8 @@ export class NiconicoHttp {
       signal?: AbortSignal | undefined;
       rateLimitMs?: number | undefined;
       idempotent?: boolean | undefined;
+      throttle?: RequestThrottle | undefined;
+      anonymous?: boolean | undefined;
     } = {},
   ): Promise<RawResponse> {
     const method = init.method ?? "GET";
@@ -210,12 +283,31 @@ export class NiconicoHttp {
       if (options.rateLimitMs !== undefined) {
         await commentRateLimiter.acquire(options.rateLimitMs);
       }
+      if (options.throttle !== undefined) {
+        await options.throttle.acquire(options.signal);
+      }
       try {
-        const raw = await this.requestOnce(url, method, init.body, extraHeaders, options.signal);
+        const raw = await this.requestOnce(
+          url,
+          method,
+          init.body,
+          extraHeaders,
+          options.signal,
+          options.anonymous === true,
+        );
+        if (raw.response.status === 429 && options.throttle !== undefined) {
+          options.throttle.penalize();
+          return raw;
+        }
         if (!isTransientStatus(raw.response.status)) {
           return raw;
         }
-        throw new RetryableHttpError(raw.response.status, url, parseRetryAfterMs(raw.response.headers));
+        throw new RetryableHttpError(
+          raw.response.status,
+          url,
+          parseRetryAfterMs(raw.response.headers),
+          readErrorEnvelope(parseJsonText(raw.text)),
+        );
       } catch (error) {
         if (options.signal?.aborted === true) throw error;
         if (error instanceof NiconicoTimeoutError && !retryable) throw error;
@@ -229,7 +321,7 @@ export class NiconicoHttp {
     }
 
     if (lastError instanceof RetryableHttpError) {
-      throw new NiconicoApiError(url, { status: lastError.status });
+      throw new NiconicoApiError(url, { status: lastError.status, ...lastError.envelope });
     }
     if (lastError instanceof NiconicoTimeoutError) {
       throw lastError;
@@ -242,6 +334,8 @@ export class NiconicoHttp {
       signal: options.signal,
       rateLimitMs: options.rateLimitMs,
       idempotent: options.idempotent ?? true,
+      throttle: options.throttle,
+      anonymous: options.anonymous,
     });
     return this.parseJsonResponse<T>(url, raw, options.validateMeta !== false);
   }
@@ -262,6 +356,8 @@ export class NiconicoHttp {
       signal: options.signal,
       rateLimitMs: options.rateLimitMs,
       idempotent: options.idempotent,
+      throttle: options.throttle,
+      anonymous: options.anonymous,
     });
     return this.parseJsonResponse<T>(url, raw, options.validateMeta !== false);
   }
@@ -270,11 +366,36 @@ export class NiconicoHttp {
     return this.sendJson<T>(url, "POST", body, options);
   }
 
+  async sendForm<T>(
+    url: string,
+    method: Exclude<HttpMethod, "GET">,
+    form: Readonly<Record<string, string | number | boolean>>,
+    options: RequestOptions = {},
+  ): Promise<T> {
+    const body = new URLSearchParams();
+    for (const [key, value] of Object.entries(form)) body.set(key, String(value));
+    const raw = await this.request(
+      url,
+      { method, body: body.toString() },
+      { ...options.headers, "Content-Type": "application/x-www-form-urlencoded" },
+      {
+        signal: options.signal,
+        rateLimitMs: options.rateLimitMs,
+        idempotent: options.idempotent,
+        throttle: options.throttle,
+        anonymous: options.anonymous,
+      },
+    );
+    return this.parseJsonResponse<T>(url, raw, options.validateMeta !== false);
+  }
+
   async getText(url: string, options: Omit<RequestOptions, "validateMeta"> = {}): Promise<string> {
     const raw = await this.request(url, { method: "GET" }, options.headers, {
       signal: options.signal,
       rateLimitMs: options.rateLimitMs,
       idempotent: options.idempotent ?? true,
+      throttle: options.throttle,
+      anonymous: options.anonymous,
     });
     if (!raw.response.ok) {
       throw new NiconicoApiError(url, { status: raw.response.status });
@@ -285,12 +406,7 @@ export class NiconicoHttp {
   // oxlint-disable-next-line typescript/no-unnecessary-type-parameters
   parseJsonResponse<T>(url: string, raw: RawResponse, validateMeta: boolean): T {
     const { response, text } = raw;
-    let parsed: unknown;
-    try {
-      parsed = text.length > 0 ? JSON.parse(text) : undefined;
-    } catch {
-      parsed = undefined;
-    }
+    const parsed = parseJsonText(text);
 
     if (!response.ok) {
       throw new NiconicoApiError(url, {
@@ -328,7 +444,17 @@ function readMeta(body: unknown): NvapiMeta | undefined {
   };
 }
 
-function readErrorEnvelope(body: unknown): Pick<NiconicoApiErrorPayload, "errorCode" | "errorMessage" | "errorDetail"> {
+type ErrorEnvelope = Pick<NiconicoApiErrorPayload, "errorCode" | "errorMessage" | "errorDetail" | "reasonCode">;
+
+function parseJsonText(text: string): unknown {
+  try {
+    return text.length > 0 ? JSON.parse(text) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function readErrorEnvelope(body: unknown): ErrorEnvelope {
   if (!isRecord(body)) return {};
   const meta = isRecord(body["meta"]) ? body["meta"] : {};
   const data = isRecord(body["data"]) ? body["data"] : {};
@@ -336,6 +462,7 @@ function readErrorEnvelope(body: unknown): Pick<NiconicoApiErrorPayload, "errorC
     errorCode: optionalString(meta["errorCode"]) ?? optionalString(body["code"]),
     errorMessage: optionalString(meta["errorMessage"]) ?? optionalString(body["message"]),
     errorDetail: optionalString(data["errorDetail"]),
+    reasonCode: optionalString(data["reasonCode"]),
   };
 }
 
@@ -370,6 +497,8 @@ export function pickRequestOptions(params: Readonly<Partial<RequestOptions>>): R
   if (params.validateMeta !== undefined) options.validateMeta = params.validateMeta;
   if (params.rateLimitMs !== undefined) options.rateLimitMs = params.rateLimitMs;
   if (params.idempotent !== undefined) options.idempotent = params.idempotent;
+  if (params.throttle !== undefined) options.throttle = params.throttle;
+  if (params.anonymous !== undefined) options.anonymous = params.anonymous;
   return options;
 }
 
