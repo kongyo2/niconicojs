@@ -1,6 +1,6 @@
 import { NiconicoError } from "./errors.js";
 import { buildQuery, type NiconicoHttp, type RequestOptions, pickRequestOptions } from "./http.js";
-import type { EssentialVideo, Genre, MinimalUser, Owner, SensitiveContents } from "./types.js";
+import type { EssentialVideo, Genre, MinimalUser, Owner, SensitiveContents, VideoContentType } from "./types.js";
 
 const NVAPI = "https://nvapi.nicovideo.jp";
 
@@ -32,7 +32,9 @@ export interface VideoSearchParams extends RequestOptions {
   allowFutureContents?: boolean | undefined;
   minRegisteredAt?: string | undefined;
   maxRegisteredAt?: string | undefined;
+  minDuration?: number | undefined;
   maxDuration?: number | undefined;
+  selectContentType?: VideoContentType | undefined;
 }
 
 export interface SearchAdditionalTag {
@@ -138,6 +140,10 @@ function requireQuery(method: string, params: { keyword?: string | undefined; ta
   }
 }
 
+function joinGenres(genres: readonly string[] | undefined): string | undefined {
+  return genres === undefined || genres.length === 0 ? undefined : genres.join(",");
+}
+
 export function createSearchApi(http: NiconicoHttp): SearchApi {
   const api: SearchApi = {
     async searchVideos(params) {
@@ -150,12 +156,14 @@ export function createSearchApi(http: NiconicoHttp): SearchApi {
         sortKey: params.sortKey ?? "hot",
         sortOrder: params.sortOrder ?? "none",
         sensitiveContents: params.sensitiveContents,
-        genres: params.genres,
+        genres: joinGenres(params.genres),
         channelVideoListingStatus: params.channelVideoListingStatus,
         allowFutureContents: params.allowFutureContents,
         minRegisteredAt: params.minRegisteredAt,
         maxRegisteredAt: params.maxRegisteredAt,
+        minDuration: params.minDuration,
         maxDuration: params.maxDuration,
+        selectContentType: params.selectContentType,
       });
       const res = await http.getJson<{
         data: {
@@ -187,12 +195,14 @@ export function createSearchApi(http: NiconicoHttp): SearchApi {
         keyword: params.keyword,
         tag: params.tag,
         sensitiveContents: params.sensitiveContents,
-        genres: params.genres,
+        genres: joinGenres(params.genres),
         channelVideoListingStatus: params.channelVideoListingStatus,
         allowFutureContents: params.allowFutureContents,
         minRegisteredAt: params.minRegisteredAt,
         maxRegisteredAt: params.maxRegisteredAt,
+        minDuration: params.minDuration,
         maxDuration: params.maxDuration,
+        selectContentType: params.selectContentType,
       });
       const res = await http.getJson<{ data: { items?: Array<{ genre: Genre; count: number }> } }>(
         `${NVAPI}/v2/search/facet${query}`,

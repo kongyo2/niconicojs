@@ -31,15 +31,39 @@ describe("searchVideos", () => {
     expect(mock.query().get("sortOrder")).toBe("none");
   });
 
-  it("repeats genres and surfaces the suggested tags", async () => {
+  it("comma-joins genres, since a repeated key keeps only the last one, and surfaces the suggested tags", async () => {
     const mock = mockFetch({ json: body });
     const result = await createSearchApi(testHttp(mock)).searchVideos({
       keyword: "初音ミク",
       genres: ["music_sound", "anime"],
     });
-    expect(mock.query().getAll("genres")).toEqual(["music_sound", "anime"]);
+    expect(mock.query().getAll("genres")).toEqual(["music_sound,anime"]);
     expect(result.totalCount).toBe(42);
     expect(result.additionalTags).toEqual([{ text: "VOCALOID", type: "included_word" }]);
+  });
+
+  it("passes the content-type and duration filters through", async () => {
+    const mock = mockFetch({ json: body });
+    await createSearchApi(testHttp(mock)).searchVideos({
+      keyword: "初音ミク",
+      selectContentType: "short",
+      minDuration: 60,
+      genres: [],
+    });
+    expect(mock.query().get("selectContentType")).toBe("short");
+    expect(mock.query().get("minDuration")).toBe("60");
+    expect(mock.query().has("genres")).toBe(false);
+  });
+
+  it("applies the same genre and content-type handling to facets", async () => {
+    const mock = mockFetch({ json: nvapi({ items: [] }) });
+    await createSearchApi(testHttp(mock)).searchFacets({
+      keyword: "初音ミク",
+      genres: ["game", "anime"],
+      selectContentType: "short",
+    });
+    expect(mock.query().get("genres")).toBe("game,anime");
+    expect(mock.query().get("selectContentType")).toBe("short");
   });
 
   it("stops iterating when hasNext clears", async () => {

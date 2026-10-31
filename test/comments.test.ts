@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   createCommentsApi,
+  MAX_THREAD_KEY_REFRESHES,
   normalizeFork,
   ThreadKeyRejectedError,
   sortCommentsByVpos,
@@ -8,7 +9,8 @@ import {
   type CommentItem,
 } from "../src/comments.js";
 import type { NvCommentParams, WatchCommentThread } from "../src/watch.js";
-import { NiconicoError } from "../src/errors.js";
+import { NiconicoApiError, NiconicoError } from "../src/errors.js";
+import { NiconicoHttp } from "../src/http.js";
 import { mockFetch, testHttp, type MockFetch } from "./helpers.js";
 
 const nvComment: NvCommentParams = {
@@ -271,6 +273,192 @@ describe("regressions from review", () => {
     const api = createCommentsApi(testHttp(mock), noResolver);
     await expect(api.fetchAllComments(nvComment, { signal: controller.signal })).rejects.toBeTruthy();
     expect(mock.calls).toHaveLength(0);
+  });
+});
+
+describe("comment server and throttle", () => {
+  it("posts to the server named in nvComment", async () => {
+    const mock = mockFetch({ json: threadBody("main", []) });
+    const api = createCommentsApi(testHttp(mock), noResolver);
+    await api.fetchComments({ ...nvComment, server: "https://nvcomment-alt.nicovideo.jp/" });
+    expect(mock.only().url).toBe("https://nvcomment-alt.nicovideo.jp/v1/threads");
+  });
+
+  it("falls back to the public server when nvComment names none", async () => {
+    const mock = mockFetch({ json: threadBody("main", []) });
+    const api = createCommentsApi(testHttp(mock), noResolver);
+    await api.fetchComments({ ...nvComment, server: "" });
+    expect(mock.only().url).toBe("https://public.nvcomment.nicovideo.jp/v1/threads");
+  });
+
+  it("routes every nvcomment call through the client's comment throttle", async () => {
+    let acquired = 0;
+    const throttle = {
+      acquire: () => {
+        acquired += 1;
+        return Promise.resolve();
+      },
+      penalize: () => undefined,
+    };
+    const mock = mockFetch({ json: threadBody("main", []) });
+    const http = new NiconicoHttp({ fetch: mock.fetch, retryAttempts: 2, commentThrottle: throttle });
+    const api = createCommentsApi(http, noResolver);
+    await api.fetchComments(nvComment);
+    await api.fetchComments(nvComment);
+    expect(acquired).toBe(2);
+  });
+
+  it("hands a 429 straight back instead of hammering a rate-limited server, and penalizes the throttle", async () => {
+    let penalized = 0;
+    const throttle = {
+      acquire: () => Promise.resolve(),
+      penalize: () => {
+        penalized += 1;
+      },
+    };
+    const mock = mockFetch([
+      { status: 429, json: { meta: { status: 429, errorCode: "TOO_MANY_REQUESTS" } } },
+      { json: threadBody("main", []) },
+    ]);
+    const http = new NiconicoHttp({
+      fetch: mock.fetch,
+      retryAttempts: 3,
+      retryBaseDelayMs: 1,
+      commentThrottle: throttle,
+    });
+    const error = await createCommentsApi(http, noResolver)
+      .fetchComments(nvComment)
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(NiconicoApiError);
+    expect((error as NiconicoApiError).isRateLimited()).toBe(true);
+    expect(mock.calls).toHaveLength(1);
+    expect(penalized).toBe(1);
+  });
+});
+
+describe("fetchAllComments key refresh", () => {
+  const expired = { status: 400, json: { meta: { status: 400, errorCode: "EXPIRED_TOKEN" } } };
+
+  it("swaps in a fresh thread key when the old one expires mid-walk", async () => {
+    const mock = mockFetch([
+      { json: threadBody("owner", []) },
+      { json: threadBody("main", comments(3, 10, 0)) },
+      expired,
+      { json: threadBody("main", comments(2, 1, 100)) },
+    ]);
+    const keys: string[] = [];
+    const api = createCommentsApi(testHttp(mock, { session: "s" }), noResolver);
+    const all = await api.fetchAllComments(nvComment, {
+      refreshThreadKey: () => {
+        keys.push("fresh");
+        return Promise.resolve("fresh-jwt");
+      },
+    });
+    expect(keys).toHaveLength(1);
+    expect(all.map((c) => c.no).sort((a, b) => a - b)).toEqual([1, 2, 10, 11, 12]);
+    const retried = JSON.parse(mock.calls[3]?.body ?? "{}") as { threadKey: string; additionals: { when: number } };
+    const failed = JSON.parse(mock.calls[2]?.body ?? "{}") as { threadKey: string; additionals: { when: number } };
+    expect(failed.threadKey).toBe("jwt");
+    expect(retried.threadKey).toBe("fresh-jwt");
+    expect(retried.additionals.when).toBe(failed.additionals.when);
+  });
+
+  it("gives up after a bounded number of consecutive refreshes", async () => {
+    const mock = mockFetch([{ json: threadBody("owner", []) }, expired]);
+    let refreshes = 0;
+    const api = createCommentsApi(testHttp(mock, { session: "s" }), noResolver);
+    await expect(
+      api.fetchAllComments(nvComment, {
+        refreshThreadKey: () => {
+          refreshes += 1;
+          return Promise.resolve(`k${refreshes}`);
+        },
+      }),
+    ).rejects.toBeInstanceOf(ThreadKeyRejectedError);
+    expect(refreshes).toBe(MAX_THREAD_KEY_REFRESHES);
+  });
+
+  it("does not refresh a key the server called invalid", async () => {
+    const mock = mockFetch([
+      { json: threadBody("owner", []) },
+      { status: 400, json: { meta: { status: 400, errorCode: "INVALID_TOKEN" } } },
+    ]);
+    let refreshes = 0;
+    const api = createCommentsApi(testHttp(mock, { session: "s" }), noResolver);
+    await expect(
+      api.fetchAllComments(nvComment, {
+        refreshThreadKey: () => {
+          refreshes += 1;
+          return Promise.resolve("k");
+        },
+      }),
+    ).rejects.toBeInstanceOf(ThreadKeyRejectedError);
+    expect(refreshes).toBe(0);
+  });
+
+  it("stops walking a thread after the page that reaches stopAtUnixSec", async () => {
+    const mock = mockFetch([
+      { json: threadBody("owner", []) },
+      { json: threadBody("main", comments(3, 100, 0)) },
+      { json: threadBody("main", comments(3, 50, 500)) },
+      { json: threadBody("main", comments(3, 10, 1000)) },
+    ]);
+    const api = createCommentsApi(testHttp(mock, { session: "s" }), noResolver);
+    const all = await api.fetchAllComments(nvComment, { stopAtUnixSec: 1_700_000_000 - 10 });
+    expect(mock.calls).toHaveLength(3);
+    expect(all.map((c) => c.no).sort((a, b) => a - b)).toEqual([50, 51, 52, 100, 101, 102]);
+  });
+
+  it("waits out a 429 and resumes the walk where it stopped", async () => {
+    const limited = { status: 429, json: { meta: { status: 429, errorCode: "TOO_MANY_REQUESTS" } } };
+    const mock = mockFetch([
+      { json: threadBody("owner", []) },
+      { json: threadBody("main", comments(3, 10, 0)) },
+      limited,
+      limited,
+      { json: threadBody("main", comments(2, 1, 100)) },
+    ]);
+    const waits: Array<[number, number]> = [];
+    const api = createCommentsApi(testHttp(mock, { session: "s" }), noResolver);
+    const all = await api.fetchAllComments(nvComment, {
+      rateLimitWaitMs: 5,
+      onRateLimited: (waitMs, attempt) => waits.push([waitMs, attempt]),
+    });
+    expect(waits).toEqual([
+      [5, 1],
+      [5, 2],
+    ]);
+    expect(all.map((c) => c.no).sort((a, b) => a - b)).toEqual([1, 2, 10, 11, 12]);
+    const resumed = JSON.parse(mock.calls[4]?.body ?? "{}") as { additionals: { when: number } };
+    const limitedBody = JSON.parse(mock.calls[2]?.body ?? "{}") as { additionals: { when: number } };
+    expect(resumed.additionals.when).toBe(limitedBody.additionals.when);
+  });
+
+  it("gives up once the rate-limit waits are spent", async () => {
+    const mock = mockFetch([
+      { json: threadBody("owner", []) },
+      { status: 429, json: { meta: { status: 429, errorCode: "TOO_MANY_REQUESTS" } } },
+    ]);
+    const api = createCommentsApi(testHttp(mock, { session: "s" }), noResolver);
+    const error = await api
+      .fetchAllComments(nvComment, { rateLimitWaitMs: 1, maxRateLimitWaits: 2 })
+      .catch((e: unknown) => e);
+    expect((error as NiconicoApiError).isRateLimited()).toBe(true);
+    expect(mock.calls).toHaveLength(4);
+  });
+
+  it("re-resolves the video's watch data for a fresh key when fetching by id", async () => {
+    let resolutions = 0;
+    const resolver = () => {
+      resolutions += 1;
+      return Promise.resolve({ ...nvComment, threadKey: `jwt${resolutions}` });
+    };
+    const mock = mockFetch([{ json: threadBody("owner", []) }, expired, { json: threadBody("main", comments(1, 1)) }]);
+    const api = createCommentsApi(testHttp(mock, { session: "s" }), resolver);
+    const all = await api.fetchAllCommentsByVideoId("sm9");
+    expect(resolutions).toBe(2);
+    expect(all).toHaveLength(1);
+    expect((JSON.parse(mock.calls[2]?.body ?? "{}") as { threadKey: string }).threadKey).toBe("jwt2");
   });
 });
 

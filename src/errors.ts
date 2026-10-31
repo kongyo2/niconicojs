@@ -10,6 +10,7 @@ export interface NiconicoApiErrorPayload {
   errorCode?: string | undefined;
   errorMessage?: string | undefined;
   errorDetail?: string | undefined;
+  reasonCode?: string | undefined;
 }
 
 export class NiconicoApiError extends NiconicoError {
@@ -17,11 +18,13 @@ export class NiconicoApiError extends NiconicoError {
   readonly errorCode: string | undefined;
   readonly errorMessage: string | undefined;
   readonly errorDetail: string | undefined;
+  readonly reasonCode: string | undefined;
   readonly url: string;
 
   constructor(url: string, payload: NiconicoApiErrorPayload) {
     const parts = [String(payload.status)];
     if (payload.errorCode !== undefined) parts.push(`errorCode=${payload.errorCode}`);
+    if (payload.reasonCode !== undefined) parts.push(`reasonCode=${payload.reasonCode}`);
     if (payload.errorDetail !== undefined) parts.push(`errorDetail=${payload.errorDetail}`);
     if (payload.errorMessage !== undefined) parts.push(`errorMessage=${payload.errorMessage}`);
     super(`Niconico API request failed: ${parts.join(" ")} (${url})`);
@@ -29,6 +32,7 @@ export class NiconicoApiError extends NiconicoError {
     this.errorCode = payload.errorCode;
     this.errorMessage = payload.errorMessage;
     this.errorDetail = payload.errorDetail;
+    this.reasonCode = payload.reasonCode;
     this.url = url;
   }
 
@@ -38,6 +42,14 @@ export class NiconicoApiError extends NiconicoError {
 
   isUnauthorized(): boolean {
     return this.status === 401;
+  }
+
+  isRateLimited(): boolean {
+    return this.status === 429;
+  }
+
+  isMaintenance(): boolean {
+    return this.errorCode === "MAINTENANCE";
   }
 }
 

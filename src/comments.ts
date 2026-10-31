@@ -1,9 +1,15 @@
 import { NiconicoApiError, NiconicoError } from "./errors.js";
-import { COMMENT_RATE_LIMIT_MS, type NiconicoHttp, type RequestOptions } from "./http.js";
+import { abortableSleep, type NiconicoHttp, type RequestOptions } from "./http.js";
 import type { CommentFork, NvCommentParams, NvCommentTarget, WatchCommentThread } from "./watch.js";
 
 const NVCOMMENT = "https://public.nvcomment.nicovideo.jp";
 const NVAPI = "https://nvapi.nicovideo.jp";
+
+export const MAX_THREAD_KEY_REFRESHES = 3;
+
+export const RATE_LIMIT_WAIT_MS = 60_000;
+
+export const MAX_RATE_LIMIT_WAITS = 5;
 
 export interface CommentItem {
   id: string;
@@ -50,6 +56,11 @@ export interface FetchAllCommentsOptions {
   maxRoundsPerThread?: number | undefined;
   maxTotalCount?: number | undefined;
   startWhenUnixSec?: number | undefined;
+  stopAtUnixSec?: number | undefined;
+  refreshThreadKey?: (() => Promise<string>) | undefined;
+  rateLimitWaitMs?: number | undefined;
+  maxRateLimitWaits?: number | undefined;
+  onRateLimited?: ((waitMs: number, attempt: number) => void) | undefined;
   signal?: AbortSignal | undefined;
   onProgress?: ((fetched: number) => void) | undefined;
 }
@@ -66,6 +77,7 @@ export interface CommentsApi {
       language?: string | undefined;
       when?: number | undefined;
       resFrom?: number | undefined;
+      server?: string | undefined;
     },
   ): Promise<CommentThread[]>;
   getThreadKey(videoId: string, options?: RequestOptions): Promise<string>;
@@ -74,6 +86,7 @@ export interface CommentsApi {
     options?: RequestOptions & { includeEasy?: boolean | undefined; language?: string | undefined },
   ): Promise<CommentThread[]>;
   fetchAllComments(nvComment: NvCommentParams, options?: FetchAllCommentsOptions): Promise<CommentItem[]>;
+  fetchAllCommentsByVideoId(videoId: string, options?: FetchAllCommentsOptions): Promise<CommentItem[]>;
   postComment(params: PostCommentParams): Promise<PostCommentResult>;
   getPostKey(threadId: string | number, options?: RequestOptions): Promise<string>;
 }
@@ -129,6 +142,10 @@ const EXPIRED_HINT = "Thread keys are short-lived — refetch watch data or call
 const GUEST_HINT =
   "Reading past comments (additionals.when) requires a logged-in session; a guest key is only accepted for the initial payload.";
 
+function commentServer(server: string | undefined): string {
+  return server === undefined || server.length === 0 ? NVCOMMENT : server.replace(/\/+$/, "");
+}
+
 export function createCommentsApi(http: NiconicoHttp, resolveWatchThreads: WatchThreadResolver): CommentsApi {
   function rejectKey(errorCode: string, walkedBackwards: boolean): never {
     throw new ThreadKeyRejectedError(
@@ -137,14 +154,18 @@ export function createCommentsApi(http: NiconicoHttp, resolveWatchThreads: Watch
     );
   }
 
-  async function postThreads(body: ThreadsRequestBody, signal: AbortSignal | undefined): Promise<CommentThread[]> {
-    const url = `${NVCOMMENT}/v1/threads`;
+  async function postThreads(
+    server: string,
+    body: ThreadsRequestBody,
+    signal: AbortSignal | undefined,
+  ): Promise<CommentThread[]> {
+    const url = `${server}/v1/threads`;
     const walkedBackwards = body.additionals?.when !== undefined;
     let res: ThreadsResponse;
     try {
       res = await http.postJson<ThreadsResponse>(url, body, {
         validateMeta: false,
-        rateLimitMs: COMMENT_RATE_LIMIT_MS,
+        throttle: http.commentThrottle,
         idempotent: true,
         signal,
       });
@@ -172,6 +193,7 @@ export function createCommentsApi(http: NiconicoHttp, resolveWatchThreads: Watch
       return api.fetchCommentsWithKey(nvComment.threadKey, nvComment.params.targets, {
         ...options,
         language: options.language ?? nvComment.params.language,
+        server: nvComment.server,
       });
     },
 
@@ -180,6 +202,7 @@ export function createCommentsApi(http: NiconicoHttp, resolveWatchThreads: Watch
       if (options.when !== undefined) additionals.when = options.when;
       if (options.resFrom !== undefined) additionals.res_from = options.resFrom;
       return postThreads(
+        commentServer(options.server),
         {
           params: { targets: [...targets], language: options.language ?? "ja-jp" },
           threadKey,
@@ -207,7 +230,7 @@ export function createCommentsApi(http: NiconicoHttp, resolveWatchThreads: Watch
         options.includeEasy === true
           ? nvComment.params.targets
           : nvComment.params.targets.filter((target) => target.fork !== "easy");
-      return api.fetchCommentsWithKey(nvComment.threadKey, targets, options);
+      return api.fetchCommentsWithKey(nvComment.threadKey, targets, { ...options, server: nvComment.server });
     },
 
     async getPostKey(threadId, options = {}) {
@@ -234,7 +257,7 @@ export function createCommentsApi(http: NiconicoHttp, resolveWatchThreads: Watch
           vposMs: params.vposMs,
           postKey,
         },
-        { rateLimitMs: COMMENT_RATE_LIMIT_MS, signal: params.signal, headers: { "X-Client-Os-Type": "others" } },
+        { throttle: http.commentThrottle, signal: params.signal, headers: { "X-Client-Os-Type": "others" } },
       );
       const id = res.data?.id;
       const no = res.data?.no;
@@ -254,6 +277,45 @@ export function createCommentsApi(http: NiconicoHttp, resolveWatchThreads: Watch
         ...targets.filter((target) => target.fork !== "owner"),
       ];
 
+      let threadKey = nvComment.threadKey;
+      const refresh = options.refreshThreadKey;
+      const waitMs = options.rateLimitWaitMs ?? RATE_LIMIT_WAIT_MS;
+      const maxWaits = options.maxRateLimitWaits ?? MAX_RATE_LIMIT_WAITS;
+      const fetchPage = async (target: NvCommentTarget, when: number): Promise<CommentThread[]> => {
+        let refreshes = 0;
+        let waits = 0;
+        for (;;) {
+          try {
+            return await api.fetchCommentsWithKey(threadKey, [target], {
+              language: nvComment.params.language,
+              server: nvComment.server,
+              when,
+              resFrom: -1000,
+              ...(options.signal === undefined ? {} : { signal: options.signal }),
+            });
+          } catch (error) {
+            if (
+              error instanceof ThreadKeyRejectedError &&
+              error.errorCode === "EXPIRED_TOKEN" &&
+              refresh !== undefined &&
+              refreshes < MAX_THREAD_KEY_REFRESHES
+            ) {
+              refreshes += 1;
+              options.signal?.throwIfAborted();
+              threadKey = await refresh();
+              continue;
+            }
+            if (error instanceof NiconicoApiError && error.isRateLimited() && waits < maxWaits) {
+              waits += 1;
+              options.onRateLimited?.(waitMs, waits);
+              await abortableSleep(waitMs, options.signal);
+              continue;
+            }
+            throw error;
+          }
+        }
+      };
+
       const seen = new Map<string, CommentItem>();
       let reachedLimit = false;
 
@@ -266,12 +328,7 @@ export function createCommentsApi(http: NiconicoHttp, resolveWatchThreads: Watch
         for (let round = 0; round < maxRounds; round += 1) {
           options.signal?.throwIfAborted();
 
-          const threads = await api.fetchCommentsWithKey(nvComment.threadKey, [target], {
-            language: nvComment.params.language,
-            when,
-            resFrom: -1000,
-            ...(options.signal === undefined ? {} : { signal: options.signal }),
-          });
+          const threads = await fetchPage(target, when);
           const batch = threads.flatMap((thread) => thread.comments);
           if (batch.length === 0) break;
 
@@ -295,6 +352,8 @@ export function createCommentsApi(http: NiconicoHttp, resolveWatchThreads: Watch
             return Number.isNaN(posted) ? min : Math.min(min, Math.floor(posted / 1000));
           }, Number.POSITIVE_INFINITY);
 
+          if (options.stopAtUnixSec !== undefined && earliestSec <= options.stopAtUnixSec) break;
+
           const next = Number.isFinite(earliestSec) && earliestSec < when ? earliestSec : when - 1;
           if (next <= 0) break;
           when = next;
@@ -303,6 +362,16 @@ export function createCommentsApi(http: NiconicoHttp, resolveWatchThreads: Watch
 
       const result = Array.from(seen.values());
       return options.maxTotalCount === undefined ? result : result.slice(0, options.maxTotalCount);
+    },
+
+    async fetchAllCommentsByVideoId(videoId, options = {}) {
+      const resolveOptions = { signal: options.signal };
+      const nvComment = await resolveWatchThreads(videoId, resolveOptions);
+      return api.fetchAllComments(nvComment, {
+        ...options,
+        refreshThreadKey:
+          options.refreshThreadKey ?? (async () => (await resolveWatchThreads(videoId, resolveOptions)).threadKey),
+      });
     },
   };
 

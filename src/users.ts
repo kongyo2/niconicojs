@@ -10,6 +10,7 @@ import type {
   UserDetailWithRelationships,
   UserIdOrMe,
   UserRelationships,
+  VideoContentType,
 } from "./types.js";
 
 const NVAPI = "https://nvapi.nicovideo.jp";
@@ -23,6 +24,8 @@ export interface UserVideosParams extends RequestOptions {
   pageSize?: number | undefined;
   page?: number | undefined;
   sensitiveContents?: SensitiveContents | undefined;
+  selectContentType?: VideoContentType | undefined;
+  keyword?: string | undefined;
 }
 
 export interface UserVideosResult {
@@ -143,6 +146,8 @@ export function createUsersApi(http: NiconicoHttp): UsersApi {
         pageSize: params.pageSize,
         page: params.page,
         sensitiveContents: params.sensitiveContents,
+        selectContentType: params.selectContentType,
+        q: params.keyword,
       });
       const res = await http.getJson<{
         data: {

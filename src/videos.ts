@@ -1,6 +1,6 @@
 import { NiconicoError } from "./errors.js";
-import { buildQuery, type NiconicoHttp, type RequestOptions } from "./http.js";
-import type { EssentialVideo } from "./types.js";
+import { buildQuery, pickRequestOptions, type NiconicoHttp, type RequestOptions } from "./http.js";
+import type { EssentialVideo, SensitiveContents } from "./types.js";
 
 const NVAPI = "https://nvapi.nicovideo.jp";
 const NICOAD = "https://api.nicoad.nicovideo.jp";
@@ -40,7 +40,13 @@ export interface VideosApi {
     watchIds: readonly string[],
     options?: RequestOptions & { concurrency?: number | undefined },
   ): Promise<VideoLookupResult[]>;
-  getRecommendations(videoId: string, options?: RequestOptions): Promise<RecommendResult>;
+  getRecommendations(
+    videoId: string,
+    options?: RequestOptions & {
+      limit?: number | undefined;
+      sensitiveContents?: SensitiveContents | undefined;
+    },
+  ): Promise<RecommendResult>;
   getNicoAd(videoId: string, options?: RequestOptions): Promise<NicoAdInfo>;
 }
 
@@ -91,10 +97,12 @@ export function createVideosApi(http: NiconicoHttp): VideosApi {
         recipeId: "video_watch_recommendation",
         site: "nicovideo",
         videoId,
+        limit: options.limit,
+        sensitiveContents: options.sensitiveContents,
       });
       const res = await http.getJson<{
         data: { recipe?: { id?: string }; recommendId?: string; items?: RecommendItem[] };
-      }>(`${NVAPI}/v1/recommend${query}`, options);
+      }>(`${NVAPI}/v1/recommend${query}`, pickRequestOptions(options));
       return {
         recipeId: res.data.recipe?.id ?? "video_watch_recommendation",
         recommendId: res.data.recommendId ?? "",

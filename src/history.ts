@@ -1,7 +1,8 @@
-import { buildQuery, type NiconicoHttp, type RequestOptions, pickRequestOptions } from "./http.js";
+import { buildQuery, NICOVIDEO_ORIGIN, type NiconicoHttp, type RequestOptions, pickRequestOptions } from "./http.js";
 import type { EssentialVideo } from "./types.js";
 
 const NVAPI = "https://nvapi.nicovideo.jp";
+const WRITE_HEADERS: Record<string, string> = { "X-Request-With": NICOVIDEO_ORIGIN };
 
 export type WatchHistoryContentType = "long" | "short";
 
@@ -26,6 +27,7 @@ export interface WatchHistoryParams extends RequestOptions {
 export interface HistoryApi {
   getMyWatchHistory(params?: WatchHistoryParams): Promise<WatchHistoryResult>;
   iterateMyWatchHistory(params?: WatchHistoryParams): AsyncGenerator<WatchHistoryItem>;
+  removeMyWatchHistory(videoId: string, options?: RequestOptions): Promise<string[]>;
 }
 
 export function createHistoryApi(http: NiconicoHttp): HistoryApi {
@@ -57,6 +59,16 @@ export function createHistoryApi(http: NiconicoHttp): HistoryApi {
         }
         cursor = result.nextCursor;
       }
+    },
+
+    async removeMyWatchHistory(videoId, options = {}) {
+      const res = await http.sendJson<{ data?: { deletedItemIds?: string[] } }>(
+        `${base}${buildQuery({ target: videoId })}`,
+        "DELETE",
+        undefined,
+        { ...options, headers: { ...WRITE_HEADERS, ...options.headers } },
+      );
+      return res.data?.deletedItemIds ?? [];
     },
   };
 

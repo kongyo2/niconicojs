@@ -1,3 +1,4 @@
+import { NiconicoError } from "./errors.js";
 import { buildQuery, NICOVIDEO_ORIGIN, type NiconicoHttp, type RequestOptions, pickRequestOptions } from "./http.js";
 import type { EssentialVideo, MylistItem, MylistMeta, SortOrder } from "./types.js";
 
@@ -34,10 +35,27 @@ export interface MylistDetail extends MylistMeta {
 export interface WatchLaterItem {
   itemId?: number;
   watchId?: string;
+  memo?: string;
+  decoratedMemoHtml?: string;
   description?: string;
   addedAt?: string;
   status?: string;
   video: EssentialVideo;
+}
+
+export interface MylistCompact {
+  id: number;
+  isPublic: boolean;
+  name: string;
+  description: string;
+  createdAt?: string;
+}
+
+export interface MyMylistsParams extends RequestOptions {
+  sampleItemCount?: number | undefined;
+  page?: number | undefined;
+  pageSize?: number | undefined;
+  title?: string | undefined;
 }
 
 export interface WatchLaterResult {
@@ -67,9 +85,10 @@ export interface UpdateMylistParams extends RequestOptions {
 export interface MylistsApi {
   getMylist(mylistId: number | string, params?: MylistGetParams): Promise<MylistDetail>;
   iterateMylistItems(mylistId: number | string, params?: MylistGetParams): AsyncGenerator<MylistItem>;
-  getMyMylists(
-    params?: RequestOptions & { sampleItemCount?: number | undefined },
-  ): Promise<{ totalCount: number; hasNext: boolean; mylists: MylistMeta[] }>;
+  getMyMylist(mylistId: number | string, params?: MylistGetParams): Promise<MylistDetail>;
+  iterateMyMylistItems(mylistId: number | string, params?: MylistGetParams): AsyncGenerator<MylistItem>;
+  getMyMylists(params?: MyMylistsParams): Promise<{ totalCount: number; hasNext: boolean; mylists: MylistMeta[] }>;
+  getMyMylistsCompact(options?: RequestOptions): Promise<MylistCompact[]>;
   getMyWatchLater(
     params?: RequestOptions & {
       pageSize?: number | undefined;
@@ -91,9 +110,25 @@ export interface MylistsApi {
     itemIds: readonly (number | string)[],
     options?: RequestOptions,
   ): Promise<void>;
-  addWatchLater(watchId: string, options?: RequestOptions): Promise<void>;
-  removeWatchLater(watchIds: readonly string[], options?: RequestOptions): Promise<void>;
+  addWatchLater(
+    watchId: string,
+    params?: RequestOptions & { memo?: string | undefined },
+  ): Promise<WatchLaterItem | undefined>;
+  removeWatchLater(items: readonly (number | string)[], options?: RequestOptions): Promise<void>;
 }
+
+type MylistEnvelope = {
+  data: {
+    mylist: MylistMeta & {
+      items?: MylistItem[];
+      totalItemCount?: number;
+      hasNext?: boolean;
+      hasInvisibleItems?: boolean;
+    };
+  };
+};
+
+const NUMERIC_ID = /^\d+$/;
 
 export function createMylistsApi(http: NiconicoHttp): MylistsApi {
   function write(url: string, method: "POST" | "PUT" | "DELETE", options: RequestOptions): Promise<{ data?: unknown }> {
@@ -103,47 +138,96 @@ export function createMylistsApi(http: NiconicoHttp): MylistsApi {
     });
   }
 
+  function writeForm<T>(
+    url: string,
+    method: "POST" | "PUT",
+    form: Readonly<Record<string, string | boolean>>,
+    options: RequestOptions,
+  ): Promise<T> {
+    return http.sendForm<T>(url, method, form, { ...options, headers: { ...WRITE_HEADERS, ...options.headers } });
+  }
+
+  async function readMylist(path: string, params: MylistGetParams): Promise<MylistDetail> {
+    const query = buildQuery({
+      pageSize: params.pageSize,
+      page: params.page,
+      sortKey: params.sortKey,
+      sortOrder: params.sortOrder,
+    });
+    const res = await http.getJson<MylistEnvelope>(`${NVAPI}${path}${query}`, pickRequestOptions(params));
+    const mylist = res.data.mylist;
+    const items = mylist.items ?? [];
+    return {
+      ...mylist,
+      items,
+      totalItemCount: mylist.totalItemCount ?? items.length,
+      hasNext: mylist.hasNext ?? false,
+    };
+  }
+
+  async function* iterateItems(
+    read: (params: MylistGetParams) => Promise<MylistDetail>,
+    params: MylistGetParams,
+  ): AsyncGenerator<MylistItem> {
+    const pageSize = params.pageSize ?? 100;
+    let page = params.page ?? 1;
+    for (;;) {
+      const result = await read({ ...params, pageSize, page });
+      for (const item of result.items) yield item;
+      if (!result.hasNext || result.items.length === 0) return;
+      page += 1;
+    }
+  }
+
+  async function resolveWatchLaterItemIds(
+    items: readonly (number | string)[],
+    options: RequestOptions,
+  ): Promise<string[]> {
+    const itemIds: string[] = [];
+    const wanted = new Set<string>();
+    for (const item of items) {
+      const value = String(item).trim();
+      if (NUMERIC_ID.test(value)) itemIds.push(value);
+      else wanted.add(value);
+    }
+    for (let page = 1; wanted.size > 0; page += 1) {
+      const result = await api.getMyWatchLater({ ...pickRequestOptions(options), pageSize: 100, page });
+      for (const entry of result.items) {
+        const watchId = entry.watchId ?? entry.video.id;
+        if (entry.itemId !== undefined && wanted.delete(watchId)) itemIds.push(String(entry.itemId));
+      }
+      if (!result.hasNext || result.items.length === 0) break;
+    }
+    if (wanted.size > 0) {
+      throw new NiconicoError(`removeWatchLater: not in watch-later: ${[...wanted].join(", ")}`);
+    }
+    return itemIds;
+  }
+
   const api: MylistsApi = {
-    async getMylist(mylistId, params = {}) {
-      const query = buildQuery({
-        pageSize: params.pageSize,
-        page: params.page,
-        sortKey: params.sortKey,
-        sortOrder: params.sortOrder,
-      });
-      const res = await http.getJson<{
-        data: {
-          mylist: MylistMeta & {
-            items?: MylistItem[];
-            totalItemCount?: number;
-            hasNext?: boolean;
-            hasInvisibleItems?: boolean;
-          };
-        };
-      }>(`${NVAPI}/v2/mylists/${encodeURIComponent(String(mylistId))}${query}`, pickRequestOptions(params));
-      const mylist = res.data.mylist;
-      const items = mylist.items ?? [];
-      return {
-        ...mylist,
-        items,
-        totalItemCount: mylist.totalItemCount ?? items.length,
-        hasNext: mylist.hasNext ?? false,
-      };
+    getMylist(mylistId, params = {}) {
+      return readMylist(`/v2/mylists/${encodeURIComponent(String(mylistId))}`, params);
     },
 
-    async *iterateMylistItems(mylistId, params = {}) {
-      const pageSize = params.pageSize ?? 100;
-      let page = params.page ?? 1;
-      for (;;) {
-        const result = await api.getMylist(mylistId, { ...params, pageSize, page });
-        for (const item of result.items) yield item;
-        if (!result.hasNext || result.items.length === 0) return;
-        page += 1;
-      }
+    iterateMylistItems(mylistId, params = {}) {
+      return iterateItems((page) => api.getMylist(mylistId, page), params);
+    },
+
+    getMyMylist(mylistId, params = {}) {
+      return readMylist(`/v1/users/me/mylists/${encodeURIComponent(String(mylistId))}`, params);
+    },
+
+    iterateMyMylistItems(mylistId, params = {}) {
+      return iterateItems((page) => api.getMyMylist(mylistId, page), params);
     },
 
     async getMyMylists(params = {}) {
-      const query = buildQuery({ sampleItemCount: params.sampleItemCount });
+      const query = buildQuery({
+        sampleItemCount: params.sampleItemCount,
+        page: params.page,
+        pageSize: params.pageSize,
+        title: params.title,
+      });
       const res = await http.getJson<{
         data: { totalCount?: number; hasNext?: boolean; mylists?: MylistMeta[] };
       }>(`${NVAPI}/v1/users/me/mylists${query}`, pickRequestOptions(params));
@@ -153,6 +237,14 @@ export function createMylistsApi(http: NiconicoHttp): MylistsApi {
         hasNext: res.data.hasNext ?? false,
         mylists,
       };
+    },
+
+    async getMyMylistsCompact(options = {}) {
+      const res = await http.getJson<{ data: { mylists?: MylistCompact[] } }>(
+        `${NVAPI}/v1/users/me/mylists/compact`,
+        options,
+      );
+      return res.data.mylists ?? [];
     },
 
     async getMyWatchLater(params = {}) {
@@ -183,33 +275,36 @@ export function createMylistsApi(http: NiconicoHttp): MylistsApi {
     },
 
     async createMylist(params) {
-      const query = buildQuery({
-        name: params.name,
-        description: params.description ?? "",
-        isPublic: params.isPublic ?? false,
-        defaultSortKey: params.defaultSortKey ?? "addedAt",
-        defaultSortOrder: params.defaultSortOrder ?? "desc",
-      });
-      const res = await http.sendJson<{ data?: { mylistId?: number } }>(
-        `${NVAPI}/v1/users/me/mylists${query}`,
+      const res = await writeForm<{ data?: { mylistId?: number } }>(
+        `${NVAPI}/v1/users/me/mylists`,
         "POST",
-        undefined,
-        { ...pickRequestOptions(params), headers: { ...WRITE_HEADERS, ...params.headers } },
+        {
+          name: params.name,
+          description: params.description ?? "",
+          isPublic: params.isPublic ?? false,
+          defaultSortKey: params.defaultSortKey ?? "addedAt",
+          defaultSortOrder: params.defaultSortOrder ?? "desc",
+        },
+        pickRequestOptions(params),
       );
-      return res.data?.mylistId ?? 0;
+      const mylistId = res.data?.mylistId;
+      if (mylistId === undefined) {
+        throw new NiconicoError("createMylist: the response carried no mylistId");
+      }
+      return mylistId;
     },
 
     async updateMylist(params) {
-      const query = buildQuery({
-        name: params.name,
-        description: params.description,
-        isPublic: params.isPublic,
-        defaultSortKey: params.defaultSortKey,
-        defaultSortOrder: params.defaultSortOrder,
-      });
-      await write(
-        `${NVAPI}/v1/users/me/mylists/${encodeURIComponent(String(params.mylistId))}${query}`,
+      await writeForm(
+        `${NVAPI}/v1/users/me/mylists/${encodeURIComponent(String(params.mylistId))}`,
         "PUT",
+        {
+          name: params.name,
+          description: params.description,
+          isPublic: params.isPublic,
+          defaultSortKey: params.defaultSortKey,
+          defaultSortOrder: params.defaultSortOrder,
+        },
         pickRequestOptions(params),
       );
     },
@@ -229,7 +324,7 @@ export function createMylistsApi(http: NiconicoHttp): MylistsApi {
 
     async removeMylistItems(mylistId, itemIds, options = {}) {
       if (itemIds.length === 0) return;
-      const query = buildQuery({ itemIds: itemIds.map(String) });
+      const query = buildQuery({ itemIds: itemIds.map(String).join(",") });
       await write(
         `${NVAPI}/v1/users/me/mylists/${encodeURIComponent(String(mylistId))}/items${query}`,
         "DELETE",
@@ -237,13 +332,20 @@ export function createMylistsApi(http: NiconicoHttp): MylistsApi {
       );
     },
 
-    async addWatchLater(watchId, options = {}) {
-      await write(`${NVAPI}/v1/users/me/watch-later${buildQuery({ watchId })}`, "POST", options);
+    async addWatchLater(watchId, params = {}) {
+      const res = await writeForm<{ data?: { watchLater?: { item?: WatchLaterItem } } }>(
+        `${NVAPI}/v1/users/me/watch-later`,
+        "POST",
+        { watchId, memo: params.memo ?? "" },
+        pickRequestOptions(params),
+      );
+      return res.data?.watchLater?.item;
     },
 
-    async removeWatchLater(watchIds, options = {}) {
-      if (watchIds.length === 0) return;
-      await write(`${NVAPI}/v1/users/me/watch-later${buildQuery({ watchIds: [...watchIds] })}`, "DELETE", options);
+    async removeWatchLater(items, options = {}) {
+      if (items.length === 0) return;
+      const itemIds = await resolveWatchLaterItemIds(items, options);
+      await write(`${NVAPI}/v1/users/me/watch-later${buildQuery({ itemIds: itemIds.join(",") })}`, "DELETE", options);
     },
   };
 

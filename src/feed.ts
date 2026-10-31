@@ -39,6 +39,7 @@ export interface FeedActivitiesResult {
 
 export interface FeedApi {
   getActors(params?: RequestOptions & { limit?: number | undefined }): Promise<FeedActor[]>;
+  hasUnread(options?: RequestOptions): Promise<boolean>;
   getFollowingsVideo(
     params?: RequestOptions & { limit?: number | undefined; cursor?: string | undefined },
   ): Promise<FeedActivitiesResult>;
@@ -69,6 +70,16 @@ export function createFeedApi(http: NiconicoHttp): FeedApi {
       });
       assertFeedOk(url, res.code);
       return res.actors ?? [];
+    },
+
+    async hasUnread(options = {}) {
+      const url = `${FEED}/v1/unread`;
+      const res = await http.getJson<{ code?: string; isUnread?: boolean }>(url, {
+        ...pickRequestOptions(options),
+        validateMeta: false,
+      });
+      assertFeedOk(url, res.code);
+      return res.isUnread === true;
     },
 
     async getFollowingsVideo(params = {}) {

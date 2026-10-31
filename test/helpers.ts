@@ -1,4 +1,4 @@
-import { NiconicoHttp, type FetchLike, type NiconicoHttpOptions } from "../src/http.js";
+import { NiconicoHttp, type FetchLike, type NiconicoHttpOptions, type RequestThrottle } from "../src/http.js";
 
 export interface RecordedRequest {
   url: string;
@@ -81,8 +81,17 @@ export function mockFetch(specs: MockResponseSpec | MockResponseSpec[]): MockFet
   };
 }
 
+export const unthrottled: RequestThrottle = {
+  acquire: () => Promise.resolve(),
+  penalize: () => undefined,
+};
+
 export function testHttp(mock: MockFetch, options: NiconicoHttpOptions = {}): NiconicoHttp {
-  return new NiconicoHttp({ fetch: mock.fetch, retryAttempts: 1, ...options });
+  return new NiconicoHttp({ fetch: mock.fetch, retryAttempts: 1, commentThrottle: unthrottled, ...options });
+}
+
+export function formOf(call: RecordedRequest): URLSearchParams {
+  return new URLSearchParams(call.body ?? "");
 }
 
 export function nvapi(data: unknown): { meta: { status: number }; data: unknown } {
@@ -92,3 +101,5 @@ export function nvapi(data: unknown): { meta: { status: number }; data: unknown 
 export const LIVE_ENABLED: boolean = process.env["NICONICO_LIVE"] === "1";
 
 export const LIVE_SESSION: string | undefined = process.env["NICONICO_SESSION"];
+
+export const LIVE_WRITES: boolean = process.env["NICONICO_LIVE_WRITES"] === "1";

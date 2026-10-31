@@ -3,7 +3,7 @@ import { NiconicoClient } from "../src/client.js";
 import { createAuthApi, LOGIN_PAGE_URL, NiconicoAuthError } from "../src/auth.js";
 import { createAccountPublicApi } from "../src/account-public.js";
 import { NiconicoApiError, NiconicoError } from "../src/errors.js";
-import { mockFetch, nvapi, testHttp } from "./helpers.js";
+import { mockFetch, nvapi, testHttp, unthrottled } from "./helpers.js";
 
 const RAW_SESSION = "user_session_12345678_0000000000000000000000000000000000000000000000000000000000000000";
 
@@ -29,6 +29,7 @@ describe("NiconicoClient construction", () => {
       "feed",
       "history",
       "likes",
+      "ngComments",
     ] as const) {
       expect(nico[key], key).toBeDefined();
     }
@@ -109,7 +110,7 @@ describe("AuthApi", () => {
 });
 
 describe("comment resolver wiring", () => {
-  it("fetches watch data with noSideEffect before reading comments", async () => {
+  it("resolves comment credentials through the side-effect-free v4 watch route", async () => {
     const mock = mockFetch([
       {
         json: nvapi({
@@ -125,11 +126,12 @@ describe("comment resolver wiring", () => {
       },
       { json: { meta: { status: 200 }, data: { threads: [{ id: "1", fork: "main", comments: [] }] } } },
     ]);
-    const nico = new NiconicoClient({ fetch: mock.fetch, retryAttempts: 1 });
+    const nico = new NiconicoClient({ fetch: mock.fetch, retryAttempts: 1, commentThrottle: unthrottled });
     await nico.comments.fetchCommentsByVideoId("sm9");
 
-    expect(mock.calls[0]?.url).toContain("/api/watch/v3_guest/sm9");
-    expect(mock.query(0).get("noSideEffect")).toBe("true");
+    expect(mock.calls[0]?.url).toBe("https://nvapi.nicovideo.jp/v4/watch/sm9");
+    expect(mock.calls[0]?.method).toBe("POST");
+    expect(JSON.parse(mock.calls[0]?.body ?? "{}")).toMatchObject({ asGuest: true });
     expect(mock.calls[1]?.url).toBe("https://public.nvcomment.nicovideo.jp/v1/threads");
   });
 
