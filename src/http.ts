@@ -535,6 +535,10 @@ export function buildQuery(
   return query.length > 0 ? `?${query}` : "";
 }
 
+export function pageCursor(value: string | null | undefined): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
 export function extractUserSession(input: string): string | undefined {
   const value = input.trim().replace(/^cookie:\s*/i, "");
   if (value.length === 0) return undefined;

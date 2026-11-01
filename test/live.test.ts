@@ -229,6 +229,28 @@ authed("live: authenticated reads", () => {
     await expect(session.feed.getActors({ limit: 10 })).resolves.toBeInstanceOf(Array);
     await expect(session.feed.getFollowingsVideo({ limit: 5 })).resolves.toHaveProperty("activities");
   });
+
+  it("walks the watch history across pages and past the null cursor that ends it", async (ctx) => {
+    const whole = await session.history.getMyWatchHistory({ limit: 100 });
+    if (typeof whole.nextCursor === "string" || whole.items.length < 2) ctx.skip();
+    expect(whole.nextCursor).toBeUndefined();
+    const walked: Array<string | undefined> = [];
+    for await (const entry of session.history.iterateMyWatchHistory({ limit: Math.ceil(whole.items.length / 3) })) {
+      walked.push(entry.itemId);
+    }
+    expect(walked).toEqual(whole.items.map((entry) => entry.itemId));
+  });
+
+  it("walks the follow feed to the page that carries no cursor", async () => {
+    const ids = new Set<string | undefined>();
+    let count = 0;
+    for await (const activity of session.feed.iterateFollowingsVideo()) {
+      ids.add(activity.id);
+      count += 1;
+      if (count >= 1500) break;
+    }
+    expect(ids.size).toBe(count);
+  });
 });
 
 live("live: v4 watch, lazy data and pre-issued HLS", () => {
