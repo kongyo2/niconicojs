@@ -548,9 +548,9 @@ Every error the library itself raises extends `NiconicoError`, so one `instanceo
 
 - Transient failures (408, 429, 5xx, transport errors) are retried with exponential backoff and `Retry-After` support.
 - **Writes are never retried** unless explicitly marked `idempotent`, so a `POST` is never silently replayed. The v4 watch call and a lazy call with `noSideEffect` are idempotent and retry; `recordView` never does.
-- Comment fetches and posts share a process-wide token bucket (`commentThrottle`: `COMMENT_BURST_LIMIT` = 40 requests of burst, refilled at `COMMENT_REFILL_PER_SECOND` = 0.25 per second), even across client instances. That keeps any three-minute window under the ~100-request burst NNDD-RE saw the comment server answer with `429 TOO_MANY_REQUESTS`; the server's actual rule is unpublished and not a plain count (see [API notes](#api-notes)).
+- Comment fetches and posts share a process-wide token bucket (`commentThrottle`: `COMMENT_BURST_LIMIT` = 40 requests of burst, refilled at `COMMENT_REFILL_PER_SECOND` = 0.25 per second), even across client instances. That keeps any three-minute window under the ~100-request burst NNDD-RE saw the comment server answer with `429 TOO_MANY_REQUESTS`; the server's actual rule is unpublished and not a plain count.
 - A throttled request that still gets a 429 empties the bucket and returns the error instead of retrying into the limit. `fetchAllComments` then waits `rateLimitWaitMs` (default `RATE_LIMIT_WAIT_MS`, 60 s) and resumes from the same page, up to `maxRateLimitWaits` (default 5) times, reporting each wait through `onRateLimited` — so a long archive walk survives the limit instead of throwing away what it already fetched.
-- `getVideos` fans out one request per id (the endpoint ignores extra ids — see [API notes](#api-notes)) with bounded concurrency.
+- `getVideos` fans out one request per id with bounded concurrency.
 
 ## Using modules without the client
 
@@ -617,7 +617,7 @@ Useful scripts: `lint` / `lint:types` (oxlint, including type-aware rules), `for
 
 ## Disclaimer
 
-This is an unofficial library, not affiliated with or endorsed by Dwango / niconico. It talks to endpoints the official web frontend uses; they can change or disappear without notice (see [API notes](#api-notes) for ones that already have). Use it responsibly: keep request rates modest, respect the [niconico terms of service](https://account.nicovideo.jp/rules/account), and treat your `user_session` cookie as a secret.
+This is an unofficial library, not affiliated with or endorsed by Dwango / niconico. It talks to endpoints the official web frontend uses; they can change or disappear without notice for ones that already have). Use it responsibly: keep request rates modest, respect the [niconico terms of service](https://account.nicovideo.jp/rules/account), and treat your `user_session` cookie as a secret.
 
 ## License
 
