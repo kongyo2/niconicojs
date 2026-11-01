@@ -16,7 +16,6 @@ Unofficial TypeScript client for the [niconico](https://www.nicovideo.jp) (nicov
 - **Async iterators everywhere.** Every list endpoint has an `iterate*` companion that absorbs page- or cursor-based pagination behind `for await`.
 - **Resilient by default.** Transient failures (408/429/5xx, transport errors) retry with exponential backoff, jitter, and `Retry-After` support — while writes are never silently replayed.
 - **Cancelable and pluggable.** Every call accepts an `AbortSignal`; the client accepts a custom `fetch`, extra headers, timeouts, and retry budgets.
-- **Documented divergences.** Where the live service disagrees with the well-known unofficial docs, this library follows the service and [writes the finding down](#api-notes).
 
 ## Table of contents
 
