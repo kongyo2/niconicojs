@@ -313,6 +313,8 @@ await authed.ngComments.removeNgComments([{ type: "word", source: "ネタバレ"
 
 Each call returns the updated list with its `revision`. When the list is full the server answers `409` with `errorCode: "MAX_SETTINGS"`.
 
+`nico.history.getMyWatchHistory` pages by cursor: pass each result's `nextCursor` back as `cursor` until it comes back `undefined` on the last page, or let `iterateMyWatchHistory` walk it for you. `limit` takes 1–100.
+
 `nico.history.removeMyWatchHistory(videoId)` deletes a video from the watch history and returns the removed entry ids. It removes **every** viewing of that video, on every date — there is no single-entry delete. `nico.feed.hasUnread()` reports whether the follow feed has unseen activity.
 
 ### Users
@@ -595,6 +597,16 @@ Constants: `NICOVIDEO_ORIGIN`, `RANKING_ALL_KEY` (総合), `FEED_MAX_LIMIT` (50)
 
 ## API notes
 
+### 2026-11-01: where the cursors end
+
+Probed with a real session, both from the logged-in browser and with plain HTTP requests, after following four uploaders and playing five videos so that the feed and the history each spanned several pages.
+
+**The watch history ends on `"nextCursor": null`.** `GET /v2/users/me/watch/history` keeps the key on its last page and sets it to `null`: with `limit=4` over a 6-entry history, page 1 carried a 120-character cursor and page 2 `null`. The web history page reads `limit=6` pages and stops on that `null`. Sending `cursor=null` back is `400 INVALID_PARAMETER`, an empty `cursor=` reads the first page again, and `limit` must be 1–100 (`0` and `101` are `400`). Through 0.2.0, `iterateMyWatchHistory` took the `null` for a cursor, so every walk ended in a `TypeError` ([#5](https://github.com/kongyo2/niconicojs/issues/5)). `getMyWatchHistory` now reports the last page's cursor as `undefined` and ignores a `null` or empty `cursor`.
+
+**The follow feed ends without a `nextCursor`, and ignores `limit`.** `api.feed.nicovideo.jp/v1/activities/followings/video` omits the key on its last page: four followed uploaders' 606 activities took 25 pages, and the 25th had none. A page holds 24–25 activities whatever `limit` says — omitted, `1`, `51` and `100` all answer `200` with the same page, and the web timeline sends none. Following a user adds their earlier uploads to the feed straight away (233 for the first one followed here). `getFollowingsVideo` still sends `limit`, which does no harm, and treats a `null` cursor like a missing one.
+
+**Follow lists end on `"cursorEnd"`.** `/v1/users/{id}/following/users` closes with `hasNext: false` and `cursor: "cursorEnd"`; sending that cursor back returns no items. `iterateUserFollowing` stops on `hasNext`, so it never sends it.
+
 ### 2026-10-31: the v4 watch flow, and what changed since
 
 Found by probing with a real session and by reading the request definitions in the current web player's bundles, cross-checked against [NNDD-RE](https://github.com/NNDD-Rebuild/NNDD-RE). The routes below are exercised by the live suite (the writes by its opt-in `NICONICO_LIVE_WRITES=1` part), except the two paragraphs credited to NNDD-RE.
@@ -651,7 +663,7 @@ Findings from live probing (2026-09-08). These are the places where the service 
 
 **Storyboards need a session.** Guest watch data reports `isStoryboardAvailable: false`, and the route then answers 400. `getStoryboardFromWatch` checks the flag first.
 
-**`api.feed.nicovideo.jp` requires `limit`, capped at 50.** Omitting it or asking for 51 is a flat 400. This host also uses a `{code, message}` envelope rather than nvapi's `meta`.
+**`api.feed.nicovideo.jp` requires `limit`, capped at 50.** Omitting it or asking for 51 is a flat 400. This host also uses a `{code, message}` envelope rather than nvapi's `meta`. As of 2026-11-01 only `/v1/actors` enforces `limit`; the video feed ignores it (see above).
 
 **`public.api.nicovideo.jp` no longer resolves.** The account endpoints live on `account.nicovideo.jp/api/public`. `userIds` must be repeated, not comma-joined.
 

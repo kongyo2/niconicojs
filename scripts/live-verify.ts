@@ -264,9 +264,11 @@ async function main(): Promise<void> {
       "mylists.getMyMylists",
       "mylists.getMyWatchLater",
       "history.getMyWatchHistory",
+      "history.iterateMyWatchHistory",
       "likes.getMyLikes",
       "feed.getActors",
       "feed.getFollowingsVideo",
+      "feed.iterateFollowingsVideo",
       "watch.getWatchV4 (session)",
       "streaming guest data on a session client",
       "comments.fetchAllCommentsByVideoId",
@@ -311,6 +313,12 @@ async function main(): Promise<void> {
       return `${result.items.length} items`;
     });
 
+    await check("history.iterateMyWatchHistory", async () => {
+      const ids: string[] = [];
+      for await (const entry of client.history.iterateMyWatchHistory({ limit: 100 })) ids.push(entry.video.id);
+      return `${ids.length} entries, walked to the last page`;
+    });
+
     await check("likes.getMyLikes", async () => {
       const result = await client.likes.getMyLikes({ pageSize: 2 });
       return `${result.items.length} items`;
@@ -324,6 +332,15 @@ async function main(): Promise<void> {
     await check("feed.getFollowingsVideo", async () => {
       const result = await client.feed.getFollowingsVideo({ limit: 5 });
       return `${result.activities.length} activities`;
+    });
+
+    await check("feed.iterateFollowingsVideo", async () => {
+      const ids = new Set<string | undefined>();
+      for await (const activity of client.feed.iterateFollowingsVideo()) {
+        ids.add(activity.id);
+        if (ids.size >= 1000) return `stopped at ${ids.size} activities`;
+      }
+      return `${ids.size} activities, walked to the last page`;
     });
 
     await check("watch.getWatchV4 (session)", async () => {

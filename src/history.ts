@@ -1,4 +1,11 @@
-import { buildQuery, NICOVIDEO_ORIGIN, type NiconicoHttp, type RequestOptions, pickRequestOptions } from "./http.js";
+import {
+  buildQuery,
+  NICOVIDEO_ORIGIN,
+  type NiconicoHttp,
+  type RequestOptions,
+  pageCursor,
+  pickRequestOptions,
+} from "./http.js";
 import type { EssentialVideo } from "./types.js";
 
 const NVAPI = "https://nvapi.nicovideo.jp";
@@ -38,21 +45,19 @@ export function createHistoryApi(http: NiconicoHttp): HistoryApi {
       const query = buildQuery({
         selectContentType: params.selectContentType ?? "long",
         limit: params.limit,
-        cursor: params.cursor !== undefined && params.cursor.length > 0 ? params.cursor : undefined,
+        cursor: pageCursor(params.cursor),
       });
-      const res = await http.getJson<{ data?: { items?: WatchHistoryItem[]; nextCursor?: string } }>(
+      const res = await http.getJson<{ data?: { items?: WatchHistoryItem[]; nextCursor?: string | null } }>(
         `${base}${query}`,
         pickRequestOptions(params),
       );
-      return { items: res.data?.items ?? [], nextCursor: res.data?.nextCursor };
+      return { items: res.data?.items ?? [], nextCursor: pageCursor(res.data?.nextCursor) };
     },
 
     async *iterateMyWatchHistory(params = {}) {
-      let cursor = params.cursor;
+      let cursor = pageCursor(params.cursor);
       for (;;) {
-        const page: WatchHistoryParams = { ...params };
-        if (cursor !== undefined) page.cursor = cursor;
-        const result = await api.getMyWatchHistory(page);
+        const result = await api.getMyWatchHistory({ ...params, cursor });
         for (const item of result.items) yield item;
         if (result.items.length === 0 || result.nextCursor === undefined || result.nextCursor === cursor) {
           return;

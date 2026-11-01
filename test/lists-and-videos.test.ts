@@ -323,6 +323,41 @@ describe("HistoryApi", () => {
     }
     expect(ids).toEqual(["a", "b"]);
   });
+
+  it("ends the walk on the null cursor the last page carries", async () => {
+    const mock = mockFetch([
+      { json: nvapi({ items: [{ itemId: "h#20261031#a", video: video("a") }], nextCursor: "c1" }) },
+      { json: nvapi({ items: [{ itemId: "h#20261030#b", video: video("b") }], nextCursor: null }) },
+    ]);
+    const ids: string[] = [];
+    for await (const item of createHistoryApi(testHttp(mock)).iterateMyWatchHistory({ limit: 1 })) {
+      ids.push(item.video.id);
+    }
+    expect(ids).toEqual(["a", "b"]);
+    expect(mock.calls).toHaveLength(2);
+    expect(mock.query(0).has("cursor")).toBe(false);
+    expect(mock.query(1).get("cursor")).toBe("c1");
+  });
+
+  it("reports the last page's null cursor as undefined", async () => {
+    const mock = mockFetch({ json: nvapi({ items: [{ video: video("a") }], nextCursor: null }) });
+    const page = await createHistoryApi(testHttp(mock)).getMyWatchHistory();
+    expect(page.nextCursor).toBeUndefined();
+  });
+
+  it("sends no cursor for a null or empty one instead of throwing", async () => {
+    const mock = mockFetch({ json: nvapi({ items: [], nextCursor: null }) });
+    const history = createHistoryApi(testHttp(mock));
+    await history.getMyWatchHistory({ cursor: null as unknown as string });
+    await history.getMyWatchHistory({ cursor: "" });
+    const walked: unknown[] = [];
+    for await (const item of history.iterateMyWatchHistory({ cursor: null as unknown as string })) {
+      walked.push(item);
+    }
+    expect(walked).toEqual([]);
+    expect(mock.calls).toHaveLength(3);
+    expect(mock.calls.every((call) => !new URL(call.url).searchParams.has("cursor"))).toBe(true);
+  });
 });
 
 describe("FeedApi", () => {
@@ -332,11 +367,38 @@ describe("FeedApi", () => {
     expect(mock.query().get("limit")).toBe(String(FEED_MAX_LIMIT));
   });
 
-  it("always sends a limit, since omitting it is a 400", async () => {
+  it("sends the my_timeline context and a limit", async () => {
     const mock = mockFetch({ json: { code: "ok", activities: [] } });
     await createFeedApi(testHttp(mock)).getFollowingsVideo();
     expect(mock.query().has("limit")).toBe(true);
     expect(mock.query().get("context")).toBe("my_timeline");
+  });
+
+  it("walks cursors until a page comes back without one", async () => {
+    const mock = mockFetch([
+      { json: { code: "ok", activities: [{ id: "1", createdAt: "t" }], impressionId: "i", nextCursor: "c1" } },
+      { json: { code: "ok", activities: [{ id: "2", createdAt: "t" }], impressionId: "i" } },
+    ]);
+    const ids: Array<string | undefined> = [];
+    for await (const activity of createFeedApi(testHttp(mock)).iterateFollowingsVideo()) {
+      ids.push(activity.id);
+    }
+    expect(ids).toEqual(["1", "2"]);
+    expect(mock.calls).toHaveLength(2);
+    expect(mock.query(1).get("cursor")).toBe("c1");
+  });
+
+  it("also ends on a null cursor, and never sends a null one", async () => {
+    const mock = mockFetch({ json: { code: "ok", activities: [{ id: "1", createdAt: "t" }], nextCursor: null } });
+    const feed = createFeedApi(testHttp(mock));
+    const ids: Array<string | undefined> = [];
+    for await (const activity of feed.iterateFollowingsVideo({ cursor: null as unknown as string })) {
+      ids.push(activity.id);
+    }
+    expect(ids).toEqual(["1"]);
+    await expect(feed.getFollowingsVideo()).resolves.toHaveProperty("nextCursor", undefined);
+    expect(mock.calls).toHaveLength(2);
+    expect(mock.query(0).has("cursor")).toBe(false);
   });
 
   it("treats a non-ok code as a failure", async () => {

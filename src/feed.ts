@@ -1,5 +1,5 @@
 import { NiconicoError } from "./errors.js";
-import { buildQuery, type NiconicoHttp, type RequestOptions, pickRequestOptions } from "./http.js";
+import { buildQuery, type NiconicoHttp, type RequestOptions, pageCursor, pickRequestOptions } from "./http.js";
 
 const FEED = "https://api.feed.nicovideo.jp";
 
@@ -86,28 +86,26 @@ export function createFeedApi(http: NiconicoHttp): FeedApi {
       const url = `${FEED}/v1/activities/followings/video${buildQuery({
         context: "my_timeline",
         limit: clampLimit(params.limit, 25),
-        cursor: params.cursor !== undefined && params.cursor.length > 0 ? params.cursor : undefined,
+        cursor: pageCursor(params.cursor),
       })}`;
       const res = await http.getJson<{
         code?: string;
         activities?: FeedActivity[];
         impressionId?: string;
-        nextCursor?: string;
+        nextCursor?: string | null;
       }>(url, { ...pickRequestOptions(params), validateMeta: false });
       assertFeedOk(url, res.code);
       return {
         activities: res.activities ?? [],
         impressionId: res.impressionId,
-        nextCursor: res.nextCursor,
+        nextCursor: pageCursor(res.nextCursor),
       };
     },
 
     async *iterateFollowingsVideo(params = {}) {
-      let cursor = params.cursor;
+      let cursor = pageCursor(params.cursor);
       for (;;) {
-        const page: RequestOptions & { limit?: number | undefined; cursor?: string | undefined } = { ...params };
-        if (cursor !== undefined) page.cursor = cursor;
-        const result = await api.getFollowingsVideo(page);
+        const result = await api.getFollowingsVideo({ ...params, cursor });
         for (const activity of result.activities) yield activity;
         if (result.activities.length === 0 || result.nextCursor === undefined || result.nextCursor === cursor) {
           return;
